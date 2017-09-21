@@ -23,7 +23,7 @@ use super::*;
 /// See `SpanData` for the info on span fields in decoded representation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(packed)]
-pub struct Span(u32);
+pub struct Span(u64);
 
 /// Dummy span, both position and length are zero, syntax context is zero as well.
 /// This span is kept inline and encoded with format 0.
@@ -45,9 +45,9 @@ impl Span {
 }
 
 // Tags
-const TAG_INLINE: u32 = 0;
-const TAG_INTERNED: u32 = 1;
-const TAG_MASK: u32 = 1;
+const TAG_INLINE: u64 = 0;
+const TAG_INTERNED: u64 = 1;
+const TAG_MASK: u64 = 1;
 
 // Fields indexes
 const BASE_INDEX: usize = 0;
@@ -56,20 +56,20 @@ const CTXT_INDEX: usize = 2;
 
 // Tag = 0, inline format.
 // -----------------------------------
-// | base 31:8  | len 7:1  | tag 0:0 |
+// | base 63:39 | len 38:15 | ctxt 14:1  | tag 0:0 |
 // -----------------------------------
-const INLINE_SIZES: [u32; 3] = [24, 7, 0];
-const INLINE_OFFSETS: [u32; 3] = [8, 1, 1];
+const INLINE_SIZES: [u64; 3] = [25, 24, 14];
+const INLINE_OFFSETS: [u64; 3] = [39, 15, 1];
 
 // Tag = 1, interned format.
 // ------------------------
-// | index 31:1 | tag 0:0 |
+// | index 63:1 | tag 0:0 |
 // ------------------------
-const INTERNED_INDEX_SIZE: u32 = 31;
-const INTERNED_INDEX_OFFSET: u32 = 1;
+const INTERNED_INDEX_SIZE: u64 = 63;
+const INTERNED_INDEX_OFFSET: u64 = 1;
 
 fn encode(sd: &SpanData) -> Span {
-    let (base, len, ctxt) = (sd.lo.0, sd.hi.0 - sd.lo.0, sd.ctxt.0);
+    let (base, len, ctxt) = (sd.lo.0 as u64, (sd.hi.0 - sd.lo.0) as u64, sd.ctxt.0 as u64);
 
     let val = if (base >> INLINE_SIZES[BASE_INDEX]) == 0 &&
                  (len >> INLINE_SIZES[LEN_INDEX]) == 0 &&
@@ -77,18 +77,18 @@ fn encode(sd: &SpanData) -> Span {
         (base << INLINE_OFFSETS[BASE_INDEX]) | (len << INLINE_OFFSETS[LEN_INDEX]) |
         (ctxt << INLINE_OFFSETS[CTXT_INDEX]) | TAG_INLINE
     } else {
-        let index = with_span_interner(|interner| interner.intern(sd));
+        let index = with_span_interner(|interner| interner.intern(sd)) as u64;
         (index << INTERNED_INDEX_OFFSET) | TAG_INTERNED
     };
     Span(val)
 }
 
 fn decode(span: Span) -> SpanData {
-    let val = span.0;
+    let val = span.0 as u64;
 
     // Extract a field at position `pos` having size `size`.
-    let extract = |pos: u32, size: u32| {
-        let mask = ((!0u32) as u64 >> (32 - size)) as u32; // Can't shift u32 by 32
+    let extract = |pos: u64, size: u64| {
+        let mask = (!0u64) >> (64 - size);
         (val >> pos) & mask
     };
 
@@ -98,9 +98,13 @@ fn decode(span: Span) -> SpanData {
         extract(INLINE_OFFSETS[CTXT_INDEX], INLINE_SIZES[CTXT_INDEX]),
     )} else {
         let index = extract(INTERNED_INDEX_OFFSET, INTERNED_INDEX_SIZE);
-        return with_span_interner(|interner| *interner.get(index));
+        return with_span_interner(|interner| *interner.get(index as u32));
     };
-    SpanData { lo: BytePos(base), hi: BytePos(base + len), ctxt: SyntaxContext(ctxt) }
+    SpanData {
+        lo: BytePos(base as u32),
+        hi: BytePos((base + len) as u32),
+        ctxt: SyntaxContext(ctxt as u32)
+    }
 }
 
 #[derive(Default)]
