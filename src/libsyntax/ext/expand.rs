@@ -770,7 +770,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
 
     fn collect_attr(&mut self,
                     attr: Option<ast::Attribute>,
-                    traits: Vec<Path>,
+                    mut traits: Vec<Path>,
                     item: Annotatable,
                     kind: ExpansionKind)
                     -> Expansion {
@@ -778,7 +778,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
            (kind == ExpansionKind::TraitItems || kind == ExpansionKind::ImplItems) {
             self.cx.span_err(traits[0].span, "`derive` can be only be applied to items");
             self.cx.trace_macros_diag();
-            return kind.expect_from_annotatables(::std::iter::once(item));
+            traits = Vec::new();
         }
         self.collect(kind, InvocationKind::Attr { attr: attr, traits: traits, item: item })
     }
