@@ -636,7 +636,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                 invoc.expansion_data.mark.set_expn_info(expn_info);
                 let span = span.with_ctxt(self.cx.backtrace());
                 let dummy = ast::MetaItem { // FIXME(jseyfried) avoid this
-                    name: keywords::Invalid.name(),
+                    name: ast::MetaItemName::Single(keywords::Invalid.name()),
                     span: DUMMY_SP,
                     node: ast::MetaItemKind::Word,
                 };

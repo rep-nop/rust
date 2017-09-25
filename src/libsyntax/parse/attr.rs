@@ -159,7 +159,8 @@ impl<'a> Parser<'a> {
         };
         Ok(if let Some(meta) = meta {
             self.bump();
-            (ast::Path::from_ident(meta.span, ast::Ident::with_empty_ctxt(meta.name)),
+            // repnop TODO: check this out later
+            (ast::Path::from_ident(meta.span, ast::Ident::with_empty_ctxt(meta.name.single().unwrap())),
              meta.node.tokens(meta.span))
         } else {
             (self.parse_path(PathStyle::Mod)?, self.parse_tokens())
@@ -238,7 +239,14 @@ impl<'a> Parser<'a> {
         let lo = self.span;
         let ident = self.parse_ident()?;
         let node = self.parse_meta_item_kind()?;
-        Ok(ast::MetaItem { name: ident.name, node: node, span: lo.to(self.prev_span) })
+
+        if let Ok(meta_kind) = node {
+            match meta_kind {
+                // repnop TODO: check this out later
+                ast::MetaItemKind::Namespace => Ok(ast::MetaItem { name: ast::MetaItemName::Namespaced(vec![ident.name]), node: node, span: lo.to(self.prev_span) }),
+                _ => Ok(ast::MetaItem { name: ast::MetaItemName::Single(ident.name), node: node, span: lo.to(self.prev_span) }),
+            }
+        }
     }
 
     pub fn parse_meta_item_kind(&mut self) -> PResult<'a, ast::MetaItemKind> {
@@ -246,6 +254,8 @@ impl<'a> Parser<'a> {
             ast::MetaItemKind::NameValue(self.parse_unsuffixed_lit()?)
         } else if self.eat(&token::OpenDelim(token::Paren)) {
             ast::MetaItemKind::List(self.parse_meta_seq()?)
+        } else if self.eat(&token::ModSep) {
+            ast::MetaItemKind::Namespace
         } else {
             ast::MetaItemKind::Word
         })

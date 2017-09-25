@@ -429,9 +429,33 @@ pub enum NestedMetaItemKind {
 /// E.g. `#[test]`, `#[derive(..)]` or `#[feature = "foo"]`
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub struct MetaItem {
-    pub name: Name,
+    pub name: MetaItemName,
     pub node: MetaItemKind,
     pub span: Span,
+}
+
+/// A compile-time attribute item name.
+///
+/// E.g. `test` as in `#[test]` or `clippy` and `skip` as in `#[clippy::skip]`
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub enum MetaItemName {
+    /// Single-named meta item.
+    ///
+    /// E.g. `test` in `#[test]`
+    Single(Name),
+    /// Multi-named meta item.
+    ///
+    /// E.g. `clippy` and `skip` in `#[clippy::skip]`
+    Namespaced(Vec<Name>),
+}
+
+impl MetaItemName {
+    pub fn single(&self) -> Option<Name> {
+        match *self {
+            MetaItemName::Single(name) => Some(name),
+            _ => None,
+        }
+    }
 }
 
 /// A compile-time attribute item.
@@ -443,6 +467,10 @@ pub enum MetaItemKind {
     ///
     /// E.g. `test` as in `#[test]`
     Word,
+    /// Namespaced meta item.
+    ///
+    /// E.g. `clippy::skip` as in `#[clippy::skip]`
+    Namespace,
     /// List meta item.
     ///
     /// E.g. `derive(..)` as in `#[derive(..)]`

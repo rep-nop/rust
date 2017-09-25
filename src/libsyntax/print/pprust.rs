@@ -754,22 +754,29 @@ pub trait PrintState<'a> {
 
     fn print_meta_item(&mut self, item: &ast::MetaItem) -> io::Result<()> {
         self.ibox(INDENT_UNIT)?;
+        // repnop TODO: check this out later
         match item.node {
             ast::MetaItemKind::Word => {
-                self.writer().word(&item.name.as_str())?;
+                self.writer().word(&item.name.single().unwrap().as_str())?;
             }
             ast::MetaItemKind::NameValue(ref value) => {
-                self.word_space(&item.name.as_str())?;
+                self.word_space(&item.name.single().unwrap().as_str())?;
                 self.word_space("=")?;
                 self.print_literal(value)?;
             }
             ast::MetaItemKind::List(ref items) => {
-                self.writer().word(&item.name.as_str())?;
+                self.writer().word(&item.name.single().unwrap().as_str())?;
                 self.popen()?;
                 self.commasep(Consistent,
                               &items[..],
                               |s, i| s.print_meta_list_item(i))?;
                 self.pclose()?;
+            }
+            ast::MetaItemKind::Namespace(ref path) => {
+                for name in path {
+                    self.writer().word(&name.as_str())?;
+                    self.writer().word("::")?;
+                }
             }
         }
         self.end()

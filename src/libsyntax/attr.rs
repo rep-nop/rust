@@ -16,7 +16,7 @@ pub use self::IntType::*;
 
 use ast;
 use ast::{AttrId, Attribute, Name, Ident};
-use ast::{MetaItem, MetaItemKind, NestedMetaItem, NestedMetaItemKind};
+use ast::{MetaItem, MetaItemName, MetaItemKind, NestedMetaItem, NestedMetaItemKind};
 use ast::{Lit, LitKind, Expr, ExprKind, Item, Local, Stmt, StmtKind};
 use codemap::{Spanned, respan, dummy_spanned};
 use syntax_pos::{Span, DUMMY_SP};
@@ -251,7 +251,7 @@ impl Attribute {
 }
 
 impl MetaItem {
-    pub fn name(&self) -> Name {
+    pub fn name(&self) -> MetaItemName {
         self.name
     }
 
@@ -302,8 +302,8 @@ impl Attribute {
         let mut tokens = self.tokens.trees().peekable();
         Some(MetaItem {
             name: match self.path.segments.len() {
-                1 => self.path.segments[0].identifier.name,
-                _ => return None,
+                1 => MetaItemName::Single(self.path.segments[0].identifier.name),
+                _ => MetaItemName::Namespaced(self.path.segments.iter().map(|seg| seg.identifier.name).collect()),
             },
             node: if let Some(node) = MetaItemKind::from_tokens(&mut tokens) {
                 if tokens.peek().is_some() {
@@ -349,15 +349,19 @@ impl Attribute {
     }
 
     pub fn parse_meta<'a>(&self, sess: &'a ParseSess) -> PResult<'a, MetaItem> {
-        if self.path.segments.len() > 1 {
-            sess.span_diagnostic.span_err(self.path.span, "expected ident, found path");
+        if self.path.segments.len() == 1 {
+            Ok(MetaItem {
+                name: MetaItemName::Single(self.path.segments.last().unwrap().identifier.name),
+                node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
+                span: self.span,
+            })
+        } else { // repnop TODO: Add whitelisted tools
+            Ok(MetaItem {
+                name: MetaItemName::Namespaced(self.path.segments.iter().map(|seg| seg.identifier.name).collect()),
+                node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
+                span: self.span,
+            })
         }
-
-        Ok(MetaItem {
-            name: self.path.segments.last().unwrap().identifier.name,
-            node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
-            span: self.span,
-        })
     }
 
     /// Convert self to a normal #[doc="foo"] comment, if it is a
@@ -406,16 +410,18 @@ pub fn mk_word_item(name: Name) -> MetaItem {
 }
 
 pub fn mk_spanned_name_value_item(sp: Span, name: Name, value: ast::Lit) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::NameValue(value) }
+    MetaItem { span: sp, name: MetaItemName::Single(name), node: MetaItemKind::NameValue(value) }
 }
 
 pub fn mk_spanned_list_item(sp: Span, name: Name, items: Vec<NestedMetaItem>) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::List(items) }
+    MetaItem { span: sp, name: MetaItemName::Single(name), node: MetaItemKind::List(items) }
 }
 
 pub fn mk_spanned_word_item(sp: Span, name: Name) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::Word }
+    MetaItem { span: sp, name: MetaItemName::Single(name), node: MetaItemKind::Word }
 }
+
+//pub fn mk_spanned_namespace_item(sp: Span, name: Name)
 
 
 
@@ -598,9 +604,11 @@ pub fn eval_condition<F>(cfg: &ast::MetaItem, sess: &ParseSess, eval: &mut F)
                 }
             }
 
+            // repnop TODO: maybe fix this?
+            let cfg_name = cfg.name.single().unwrap();
             // The unwraps below may look dangerous, but we've already asserted
             // that they won't fail with the loop above.
-            match &*cfg.name.as_str() {
+            match &cfg_name.as_str() {
                 "any" => mis.iter().any(|mi| {
                     eval_condition(mi.meta_item().unwrap(), sess, eval)
                 }),
@@ -621,7 +629,7 @@ pub fn eval_condition<F>(cfg: &ast::MetaItem, sess: &ParseSess, eval: &mut F)
                 }
             }
         },
-        ast::MetaItemKind::Word | ast::MetaItemKind::NameValue(..) => {
+        ast::MetaItemKind::Word | ast::MetaItemKind::NameValue(..) | ast::MetaItemKind::Namespace => {
             eval(cfg)
         }
     }
@@ -712,7 +720,10 @@ fn find_stability_generic<'a, I>(diagnostic: &Handler,
                     )+
                     for meta in metas {
                         if let Some(mi) = meta.meta_item() {
-                            match &*mi.name().as_str() {
+
+                            let mi_name = mi.name().single().unwrap();
+
+                            match &mi_name.as_str() {
                                 $(
                                     stringify!($name)
                                         => if !get(mi, &mut $name) { continue 'outer },
@@ -1104,7 +1115,8 @@ impl IntType {
 
 impl MetaItem {
     fn tokens(&self) -> TokenStream {
-        let ident = TokenTree::Token(self.span, Token::Ident(Ident::with_empty_ctxt(self.name)));
+        // repnop TODO: check this out later
+        let ident = TokenTree::Token(self.span, Token::Ident(Ident::with_empty_ctxt(self.name.single().unwrap())));
         TokenStream::concat(vec![ident.into(), self.node.tokens(self.span)])
     }
 
@@ -1130,14 +1142,15 @@ impl MetaItem {
             MetaItemKind::List(..) => list_closing_paren_pos.unwrap_or(span.hi()),
             _ => span.hi(),
         };
-        Some(MetaItem { name, node, span: span.with_hi(hi) })
+        // repnop TODO: check this out later
+        Some(MetaItem { MetaItemName::Single(name), node, span: span.with_hi(hi) })
     }
 }
 
 impl MetaItemKind {
     pub fn tokens(&self, span: Span) -> TokenStream {
         match *self {
-            MetaItemKind::Word => TokenStream::empty(),
+            MetaItemKind::Word | MetaItemKind::Namespace => TokenStream::empty(),
             MetaItemKind::NameValue(ref lit) => {
                 TokenStream::concat(vec![TokenTree::Token(span, Token::Eq).into(), lit.tokens()])
             }

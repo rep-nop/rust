@@ -1825,7 +1825,8 @@ impl<'a> Parser<'a> {
         let meta_ident = match self.token {
             token::Interpolated(ref nt) => match nt.0 {
                 token::NtMeta(ref meta) => match meta.node {
-                    ast::MetaItemKind::Word => Some(ast::Ident::with_empty_ctxt(meta.name)),
+                    // repnop TODO: check this out later
+                    ast::MetaItemKind::Word => Some(ast::Ident::with_empty_ctxt(meta.name.single().unwrap())),
                     _ => None,
                 },
                 _ => None,
