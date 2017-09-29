@@ -456,6 +456,20 @@ impl MetaItemName {
             _ => None,
         }
     }
+
+    pub fn namespaced(&self) -> Option<Vec<Name>> {
+        match *self {
+            MetaItemName::Namespaced(names) => names.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> symbol::InternedString {
+        match *self {
+            MetaItemName::Single(name) => name.as_str(),
+            MetaItemName::Namespaced(path) => path[0].as_str()
+        }
+    }
 }
 
 /// A compile-time attribute item.

@@ -772,8 +772,8 @@ pub trait PrintState<'a> {
                               |s, i| s.print_meta_list_item(i))?;
                 self.pclose()?;
             }
-            ast::MetaItemKind::Namespace(ref path) => {
-                for name in path {
+            ast::MetaItemKind::Namespace => {
+                for name in item.name.namespaced().unwrap() {
                     self.writer().word(&name.as_str())?;
                     self.writer().word("::")?;
                 }

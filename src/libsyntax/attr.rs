@@ -138,7 +138,8 @@ impl NestedMetaItem {
     /// Returns the name of the meta item, e.g. `foo` in `#[foo]`,
     /// `#[foo="bar"]` and `#[foo(bar)]`, if self is a MetaItem
     pub fn name(&self) -> Option<Name> {
-        self.meta_item().and_then(|meta_item| Some(meta_item.name()))
+        // repnop TODO: check this out later
+        self.meta_item().and_then(|meta_item| Some(meta_item.name().single().unwrap()))
     }
 
     /// Gets the string value if self is a MetaItem and the MetaItem is a
@@ -155,7 +156,8 @@ impl NestedMetaItem {
                     if meta_item_list.len() == 1 {
                         let nested_item = &meta_item_list[0];
                         if nested_item.is_literal() {
-                            Some((meta_item.name(), nested_item.literal().unwrap()))
+                            // repnop TODO: check this out later
+                            Some((meta_item.name().single().unwrap(), nested_item.literal().unwrap()))
                         } else {
                             None
                         }
@@ -284,7 +286,8 @@ impl MetaItem {
     pub fn span(&self) -> Span { self.span }
 
     pub fn check_name(&self, name: &str) -> bool {
-        self.name() == name
+        // repnop TODO: check this out later
+        self.name().single().unwrap() == name
     }
 
     pub fn is_value_str(&self) -> bool {
@@ -446,7 +449,8 @@ pub fn mk_spanned_attr_inner(sp: Span, id: AttrId, item: MetaItem) -> Attribute 
     Attribute {
         id,
         style: ast::AttrStyle::Inner,
-        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name)),
+        // repnop TODO: check this out later
+        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name.single().unwrap())),
         tokens: item.node.tokens(item.span),
         is_sugared_doc: false,
         span: sp,
@@ -464,7 +468,8 @@ pub fn mk_spanned_attr_outer(sp: Span, id: AttrId, item: MetaItem) -> Attribute 
     Attribute {
         id,
         style: ast::AttrStyle::Outer,
-        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name)),
+        // repnop TODO: check this out later
+        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name.single().unwrap())),
         tokens: item.node.tokens(item.span),
         is_sugared_doc: false,
         span: sp,
@@ -513,7 +518,7 @@ pub fn contains_feature_attr(attrs: &[Attribute], feature_name: &str) -> bool {
         item.check_name("feature") &&
         item.meta_item_list().map(|list| {
             list.iter().any(|mi| {
-                mi.word().map(|w| w.name() == feature_name)
+                mi.word().map(|w| w.name().as_str() == feature_name)
                          .unwrap_or(false)
             })
         }).unwrap_or(false)
@@ -585,7 +590,8 @@ pub fn cfg_matches(cfg: &ast::MetaItem, sess: &ParseSess, features: Option<&Feat
         if let (Some(feats), Some(gated_cfg)) = (features, GatedCfg::gate(cfg)) {
             gated_cfg.check_and_emit(sess, feats);
         }
-        sess.config.contains(&(cfg.name(), cfg.value_str()))
+        // repnop TODO: check this out later
+        sess.config.contains(&(cfg.name().single().unwrap(), cfg.value_str()))
     })
 }
 
@@ -604,11 +610,9 @@ pub fn eval_condition<F>(cfg: &ast::MetaItem, sess: &ParseSess, eval: &mut F)
                 }
             }
 
-            // repnop TODO: maybe fix this?
-            let cfg_name = cfg.name.single().unwrap();
             // The unwraps below may look dangerous, but we've already asserted
             // that they won't fail with the loop above.
-            match &cfg_name.as_str() {
+            match &*cfg.name().as_str() {
                 "any" => mis.iter().any(|mi| {
                     eval_condition(mi.meta_item().unwrap(), sess, eval)
                 }),
@@ -701,7 +705,8 @@ fn find_stability_generic<'a, I>(diagnostic: &Handler,
             let meta = meta.as_ref().unwrap();
             let get = |meta: &MetaItem, item: &mut Option<Symbol>| {
                 if item.is_some() {
-                    handle_errors(diagnostic, meta.span, AttrError::MultipleItem(meta.name()));
+                    // repnop TODO: check this out later
+                    handle_errors(diagnostic, meta.span, AttrError::MultipleItem(meta.name().single().unwrap()));
                     return false
                 }
                 if let Some(v) = meta.value_str() {
@@ -721,16 +726,15 @@ fn find_stability_generic<'a, I>(diagnostic: &Handler,
                     for meta in metas {
                         if let Some(mi) = meta.meta_item() {
 
-                            let mi_name = mi.name().single().unwrap();
-
-                            match &mi_name.as_str() {
+                            match &*mi.name().as_str() {
                                 $(
                                     stringify!($name)
                                         => if !get(mi, &mut $name) { continue 'outer },
                                 )+
                                 _ => {
+                                    // repnop TODO: check this out later
                                     handle_errors(diagnostic, mi.span,
-                                                  AttrError::UnknownMetaItem(mi.name()));
+                                                  AttrError::UnknownMetaItem(mi.name().single().unwrap()));
                                     continue 'outer
                                 }
                             }
@@ -857,8 +861,9 @@ fn find_stability_generic<'a, I>(diagnostic: &Handler,
                                 "feature" => if !get(mi, &mut feature) { continue 'outer },
                                 "since" => if !get(mi, &mut since) { continue 'outer },
                                 _ => {
+                                    // repnop TODO: check this out later
                                     handle_errors(diagnostic, meta.span,
-                                                  AttrError::UnknownMetaItem(mi.name()));
+                                                  AttrError::UnknownMetaItem(mi.name().single().unwrap()));
                                     continue 'outer
                                 }
                             }
@@ -1143,7 +1148,7 @@ impl MetaItem {
             _ => span.hi(),
         };
         // repnop TODO: check this out later
-        Some(MetaItem { MetaItemName::Single(name), node, span: span.with_hi(hi) })
+        Some(MetaItem { name: MetaItemName::Single(name), node, span: span.with_hi(hi) })
     }
 }
 
@@ -1172,7 +1177,7 @@ impl MetaItemKind {
 
     fn from_tokens<I>(tokens: &mut iter::Peekable<I>) -> Option<MetaItemKind>
         where I: Iterator<Item = TokenTree>,
-    {
+    { 
         let delimited = match tokens.peek().cloned() {
             Some(TokenTree::Token(_, token::Eq)) => {
                 tokens.next();
