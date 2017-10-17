@@ -429,10 +429,30 @@ pub enum NestedMetaItemKind {
 /// E.g. `#[test]`, `#[derive(..)]` or `#[feature = "foo"]`
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub struct MetaItem {
-    pub name: Name,
+    pub name: Name, //MetaItemName,
     pub node: MetaItemKind,
     pub span: Span,
 }
+
+/*#[derive(Clone, Eq, RustcEncodable, RustcDecodable, Hash, Debug, PartialEq)]
+pub enum MetaItemName {
+    /// A single MetaItem name
+    Single(Name),
+
+    /// A collection of MetaItem names
+    ///
+    /// Used for attribute paths
+    Namespaced(Vec<Name>),
+}*/
+
+/*impl From<MetaItemName> for Name {
+    fn from(m: MetaItemName) -> Self {
+        match m {
+            MetaItemName::Single(n) => n,
+            MetaItemName::Namespaced(v) => v[0],
+        }
+    }
+}*/
 
 /// A compile-time attribute item.
 ///

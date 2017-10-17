@@ -349,15 +349,37 @@ impl Attribute {
     }
 
     pub fn parse_meta<'a>(&self, sess: &'a ParseSess) -> PResult<'a, MetaItem> {
-        if self.path.segments.len() > 1 {
-            sess.span_diagnostic.span_err(self.path.span, "expected ident, found path");
-        }
+        // TODO: Find a new place to put the whitelist
+        static WHITELIST: [&str; 2] = ["clippy", "rustfmt"];
 
-        Ok(MetaItem {
-            name: self.path.segments.last().unwrap().identifier.name,
-            node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
-            span: self.span,
-        })
+        if self.path.segments.len() > 1 {
+            //sess.span_diagnostic.span_err(self.path.span, "expected ident, found path");
+
+            let mut is_valid_tool = false;
+
+            for wl_name in WHITELIST.iter() {
+                if *wl_name == self.path.segments[0].identifier.name.as_str() {
+                    is_valid_tool = true;
+                }
+            }  
+
+            if !is_valid_tool {
+                sess.span_diagnostic.span_err(self.path.span, "Invalid tool name");
+            }
+
+            Ok(MetaItem {
+                name: Name::intern(&self.path.segments.iter().map(|s| s.identifier.name.as_str().to_string()).collect::<Vec<String>>().join("::")),
+                node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
+                span: self.span,
+            })
+
+        } else {
+            Ok(MetaItem {
+                name: self.path.segments.last().unwrap().identifier.name,
+                node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
+                span: self.span,
+            })
+        }
     }
 
     /// Convert self to a normal #[doc="foo"] comment, if it is a
