@@ -349,17 +349,20 @@ impl Attribute {
     }
 
     pub fn parse_meta<'a>(&self, sess: &'a ParseSess) -> PResult<'a, MetaItem> {
-        // TODO: Find a new place to put the whitelist
-        static WHITELIST: [&str; 2] = ["clippy", "rustfmt"];
-
         if self.path.segments.len() > 1 {
             //sess.span_diagnostic.span_err(self.path.span, "expected ident, found path");
+            let tool_env_var = ::std::env::var("RUSTC_TOOL_WHITELIST");
+            let tool_whitelist = match tool_env_var {
+                Ok(s) => s,
+                Err(_) => String::new()
+            };
 
             let mut is_valid_tool = false;
 
-            for wl_name in WHITELIST.iter() {
+            for wl_name in tool_whitelist.split(' ') {
                 if *wl_name == self.path.segments[0].identifier.name.as_str() {
                     is_valid_tool = true;
+                    break;
                 }
             }  
 
@@ -367,8 +370,21 @@ impl Attribute {
                 sess.span_diagnostic.span_err(self.path.span, "Invalid tool name");
             }
 
+            let namelen: usize = self.path.segments.iter().map(|s| s.identifier.name.as_str().len() + 2).sum::<usize>() - 2;
+            let concat_names = {
+                let mut svec = String::with_capacity(namelen);
+                svec.push_str(&self.path.segments[0].identifier.name.as_str());
+                
+                for segment in self.path.segments.iter().skip(1) {
+                    svec.push_str("::");
+                    svec += &segment.identifier.name.as_str();
+                }
+
+                svec
+            };
+
             Ok(MetaItem {
-                name: Name::intern(&self.path.segments.iter().map(|s| s.identifier.name.as_str().to_string()).collect::<Vec<String>>().join("::")),
+                name: Name::intern(&concat_names),
                 node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
                 span: self.span,
             })
