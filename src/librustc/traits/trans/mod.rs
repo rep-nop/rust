@@ -13,16 +13,14 @@
 // seems likely that they should eventually be merged into more
 // general routines.
 
-use dep_graph::{DepGraph, DepKind, DepTrackingMap, DepTrackingMapConfig};
+use dep_graph::{DepKind, DepTrackingMapConfig};
 use infer::TransNormalize;
-use std::cell::RefCell;
 use std::marker::PhantomData;
 use syntax_pos::DUMMY_SP;
 use traits::{FulfillmentContext, Obligation, ObligationCause, SelectionContext, Vtable};
 use ty::{self, Ty, TyCtxt};
 use ty::subst::{Subst, Substs};
 use ty::fold::{TypeFoldable, TypeFolder};
-use util::common::MemoizationMap;
 
 /// Attempts to resolve an obligation to a vtable.. The result is
 /// a shallow vtable resolution -- meaning that we do not
@@ -101,6 +99,26 @@ impl<'a, 'tcx> TyCtxt<'a, 'tcx, 'tcx> {
         let substituted = self.erase_regions(&substituted);
         AssociatedTypeNormalizer::new(self).fold(&substituted)
     }
+
+    pub fn trans_apply_param_substs_env<T>(
+        self,
+        param_substs: &Substs<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+        value: &T,
+    ) -> T
+    where
+        T: TransNormalize<'tcx>,
+    {
+        debug!(
+            "apply_param_substs_env(param_substs={:?}, value={:?}, param_env={:?})",
+            param_substs,
+            value,
+            param_env,
+        );
+        let substituted = value.subst(self, param_substs);
+        let substituted = self.erase_regions(&substituted);
+        AssociatedTypeNormalizerEnv::new(self, param_env).fold(&substituted)
+    }
 }
 
 struct AssociatedTypeNormalizer<'a, 'gcx: 'a> {
@@ -130,24 +148,42 @@ impl<'a, 'gcx> TypeFolder<'gcx, 'gcx> for AssociatedTypeNormalizer<'a, 'gcx> {
         if !ty.has_projections() {
             ty
         } else {
-            self.tcx.trans_trait_caches.project_cache.memoize(ty, || {
-                debug!("AssociatedTypeNormalizer: ty={:?}", ty);
-                self.tcx.normalize_associated_type(&ty)
-            })
+            debug!("AssociatedTypeNormalizer: ty={:?}", ty);
+            self.tcx.fully_normalize_monormophic_ty(ty)
         }
     }
 }
 
-/// Specializes caches used in trans -- in particular, they assume all
-/// types are fully monomorphized and that free regions can be erased.
-pub struct TransTraitCaches<'tcx> {
-    project_cache: RefCell<DepTrackingMap<ProjectionCache<'tcx>>>,
+struct AssociatedTypeNormalizerEnv<'a, 'gcx: 'a> {
+    tcx: TyCtxt<'a, 'gcx, 'gcx>,
+    param_env: ty::ParamEnv<'gcx>,
 }
 
-impl<'tcx> TransTraitCaches<'tcx> {
-    pub fn new(graph: DepGraph) -> Self {
-        TransTraitCaches {
-            project_cache: RefCell::new(DepTrackingMap::new(graph)),
+impl<'a, 'gcx> AssociatedTypeNormalizerEnv<'a, 'gcx> {
+    fn new(tcx: TyCtxt<'a, 'gcx, 'gcx>, param_env: ty::ParamEnv<'gcx>) -> Self {
+        Self { tcx, param_env }
+    }
+
+    fn fold<T: TypeFoldable<'gcx>>(&mut self, value: &T) -> T {
+        if !value.has_projections() {
+            value.clone()
+        } else {
+            value.fold_with(self)
+        }
+    }
+}
+
+impl<'a, 'gcx> TypeFolder<'gcx, 'gcx> for AssociatedTypeNormalizerEnv<'a, 'gcx> {
+    fn tcx<'c>(&'c self) -> TyCtxt<'c, 'gcx, 'gcx> {
+        self.tcx
+    }
+
+    fn fold_ty(&mut self, ty: Ty<'gcx>) -> Ty<'gcx> {
+        if !ty.has_projections() {
+            ty
+        } else {
+            debug!("AssociatedTypeNormalizerEnv: ty={:?}", ty);
+            self.tcx.normalize_associated_type_in_env(&ty, self.param_env)
         }
     }
 }

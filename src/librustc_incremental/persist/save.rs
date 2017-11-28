@@ -9,7 +9,7 @@
 // except according to those terms.
 
 use rustc::dep_graph::{DepGraph, DepKind};
-use rustc::hir::def_id::DefId;
+use rustc::hir::def_id::{DefId, DefIndex};
 use rustc::hir::svh::Svh;
 use rustc::ich::Fingerprint;
 use rustc::middle::cstore::EncodedMetadataHashes;
@@ -63,11 +63,19 @@ pub fn save_dep_graph<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                            e));
     }
 
-    time(sess.time_passes(), "persist dep-graph", || {
+    time(sess.time_passes(), "persist query result cache", || {
         save_in(sess,
-                dep_graph_path(sess),
-                |e| encode_dep_graph(tcx, e));
+                query_cache_path(sess),
+                |e| encode_query_cache(tcx, e));
     });
+
+    if tcx.sess.opts.debugging_opts.incremental_queries {
+        time(sess.time_passes(), "persist dep-graph", || {
+            save_in(sess,
+                    dep_graph_path(sess),
+                    |e| encode_dep_graph(tcx, e));
+        });
+    }
 
     dirty_clean::check_dirty_clean_annotations(tcx);
     dirty_clean::check_dirty_clean_metadata(tcx,
@@ -181,6 +189,8 @@ fn encode_dep_graph(tcx: TyCtxt,
 
         let total_node_count = serialized_graph.nodes.len();
         let total_edge_count = serialized_graph.edge_list_data.len();
+        let (total_edge_reads, total_duplicate_edge_reads) =
+            tcx.dep_graph.edge_deduplication_data();
 
         let mut counts: FxHashMap<_, Stat> = FxHashMap();
 
@@ -218,6 +228,8 @@ fn encode_dep_graph(tcx: TyCtxt,
         println!("[incremental]");
         println!("[incremental] Total Node Count: {}", total_node_count);
         println!("[incremental] Total Edge Count: {}", total_edge_count);
+        println!("[incremental] Total Edge Reads: {}", total_edge_reads);
+        println!("[incremental] Total Duplicate Edge Reads: {}", total_duplicate_edge_reads);
         println!("[incremental]");
         println!("[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
                  "Node Kind",
@@ -262,11 +274,11 @@ fn encode_metadata_hashes(tcx: TyCtxt,
 
     if tcx.sess.opts.debugging_opts.query_dep_graph {
         for serialized_hash in &serialized_hashes.entry_hashes {
-            let def_id = DefId::local(serialized_hash.def_index);
+            let def_id = DefId::local(DefIndex::from_u32(serialized_hash.def_index));
 
             // Store entry in the index_map
             let def_path_hash = tcx.def_path_hash(def_id);
-            serialized_hashes.index_map.insert(def_id.index, def_path_hash);
+            serialized_hashes.index_map.insert(def_id.index.as_u32(), def_path_hash);
 
             // Record hash in current_metadata_hashes
             current_metadata_hashes.insert(def_id, serialized_hash.hash);
@@ -297,4 +309,10 @@ fn encode_work_products(dep_graph: &DepGraph,
         .collect();
 
     work_products.encode(encoder)
+}
+
+fn encode_query_cache(tcx: TyCtxt,
+                      encoder: &mut Encoder)
+                      -> io::Result<()> {
+    tcx.serialize_query_result_cache(encoder)
 }

@@ -175,12 +175,16 @@ fn main() {
         if let Ok(s) = env::var("RUSTC_CODEGEN_UNITS") {
             cmd.arg("-C").arg(format!("codegen-units={}", s));
         }
+        if stage != "0" && env::var("RUSTC_THINLTO").is_ok() {
+            cmd.arg("-Ccodegen-units=16").arg("-Zthinlto");
+        }
 
         // Emit save-analysis info.
         if env::var("RUSTC_SAVE_ANALYSIS") == Ok("api".to_string()) {
             cmd.arg("-Zsave-analysis");
             cmd.env("RUST_SAVE_ANALYSIS_CONFIG",
-                    "{\"output_file\": null,\"full_docs\": false,\"pub_only\": true,\
+                    "{\"output_file\": null,\"full_docs\": false,\
+                     \"pub_only\": true,\"reachable_only\": false,\
                      \"distro_crate\": true,\"signatures\": false,\"borrow_data\": false}");
         }
 

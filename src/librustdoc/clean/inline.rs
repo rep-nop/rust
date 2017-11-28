@@ -77,6 +77,11 @@ pub fn try_inline(cx: &DocContext, def: Def, name: ast::Name)
             ret.extend(build_impls(cx, did));
             clean::EnumItem(build_enum(cx, did))
         }
+        Def::TyForeign(did) => {
+            record_extern_fqn(cx, did, clean::TypeKind::Foreign);
+            ret.extend(build_impls(cx, did));
+            clean::ForeignTypeItem
+        }
         // Never inline enum variants but leave them shown as reexports.
         Def::Variant(..) => return None,
         // Assume that enum variants and struct types are reexported next to
@@ -140,11 +145,13 @@ pub fn build_external_trait(cx: &DocContext, did: DefId) -> clean::Trait {
     let generics = (cx.tcx.generics_of(did), &predicates).clean(cx);
     let generics = filter_non_trait_generics(did, generics);
     let (generics, supertrait_bounds) = separate_supertrait_bounds(generics);
+    let is_spotlight = load_attrs(cx, did).has_doc_flag("spotlight");
     clean::Trait {
         unsafety: cx.tcx.trait_def(did).unsafety,
         generics,
         items: trait_items,
         bounds: supertrait_bounds,
+        is_spotlight,
     }
 }
 
@@ -292,10 +299,10 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
         }
     }
 
-    // If this is a defaulted impl, then bail out early here
-    if tcx.is_default_impl(did) {
+    // If this is an auto impl, then bail out early here
+    if tcx.is_auto_impl(did) {
         return ret.push(clean::Item {
-            inner: clean::DefaultImplItem(clean::DefaultImpl {
+            inner: clean::AutoImplItem(clean::AutoImpl {
                 // FIXME: this should be decoded
                 unsafety: hir::Unsafety::Normal,
                 trait_: match associated_trait.as_ref().unwrap().clean(cx) {

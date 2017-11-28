@@ -26,11 +26,13 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 #if LLVM_VERSION_GE(4, 0)
-#include "llvm/Object/ModuleSummaryIndexObjectFile.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/FunctionImport.h"
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
 #include "llvm/LTO/LTO.h"
+#if LLVM_VERSION_LE(4, 0)
+#include "llvm/Object/ModuleSummaryIndexObjectFile.h"
+#endif
 #endif
 
 #include "llvm-c/Transforms/PassManagerBuilder.h"
@@ -233,7 +235,7 @@ static CodeModel::Model fromRust(LLVMRustCodeModel Model) {
   case LLVMRustCodeModel::Large:
     return CodeModel::Large;
   default:
-    llvm_unreachable("Bad CodeModel.");
+    report_fatal_error("Bad CodeModel.");
   }
 }
 
@@ -256,7 +258,7 @@ static CodeGenOpt::Level fromRust(LLVMRustCodeGenOptLevel Level) {
   case LLVMRustCodeGenOptLevel::Aggressive:
     return CodeGenOpt::Aggressive;
   default:
-    llvm_unreachable("Bad CodeGenOptLevel.");
+    report_fatal_error("Bad CodeGenOptLevel.");
   }
 }
 
@@ -300,7 +302,7 @@ static Optional<Reloc::Model> fromRust(LLVMRustRelocMode RustReloc) {
     break;
 #endif
   }
-  llvm_unreachable("Bad RelocModel.");
+  report_fatal_error("Bad RelocModel.");
 }
 
 #if LLVM_RUSTLLVM
@@ -364,7 +366,9 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     LLVMRustCodeModel RustCM, LLVMRustRelocMode RustReloc,
     LLVMRustCodeGenOptLevel RustOptLevel, bool UseSoftFloat,
     bool PositionIndependentExecutable, bool FunctionSections,
-    bool DataSections) {
+    bool DataSections,
+    bool TrapUnreachable,
+    bool Singlethread) {
 
   auto CM = fromRust(RustCM);
   auto OptLevel = fromRust(RustOptLevel);
@@ -395,6 +399,18 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   }
   Options.DataSections = DataSections;
   Options.FunctionSections = FunctionSections;
+
+  if (TrapUnreachable) {
+    // Tell LLVM to translate `unreachable` into an explicit trap instruction.
+    // This limits the extent of possible undefined behavior in some cases, as
+    // it prevents control flow from "falling through" into whatever code
+    // happens to be laid out next in memory.
+    Options.TrapUnreachable = true;
+  }
+
+  if (Singlethread) {
+    Options.ThreadModel = ThreadModel::Single;
+  }
 
   TargetMachine *TM = TheTarget->createTargetMachine(
       Trip.getTriple(), RealCPU, Feature, Options, RM, CM, OptLevel);
@@ -495,7 +511,7 @@ static TargetMachine::CodeGenFileType fromRust(LLVMRustFileType Type) {
   case LLVMRustFileType::ObjectFile:
     return TargetMachine::CGFT_ObjectFile;
   default:
-    llvm_unreachable("Bad FileType.");
+    report_fatal_error("Bad FileType.");
   }
 }
 
@@ -888,6 +904,33 @@ addPreservedGUID(const ModuleSummaryIndex &Index,
     return;
   Preserved.insert(GUID);
 
+#if LLVM_VERSION_GE(5, 0)
+  auto Info = Index.getValueInfo(GUID);
+  if (!Info) {
+    return;
+  }
+  for (auto &Summary : Info.getSummaryList()) {
+    for (auto &Ref : Summary->refs()) {
+      addPreservedGUID(Index, Preserved, Ref.getGUID());
+    }
+
+    GlobalValueSummary *GVSummary = Summary.get();
+    if (isa<FunctionSummary>(GVSummary)) {
+      auto *FS = cast<FunctionSummary>(GVSummary);
+      for (auto &Call: FS->calls()) {
+        addPreservedGUID(Index, Preserved, Call.first.getGUID());
+      }
+      for (auto &GUID: FS->type_tests()) {
+        addPreservedGUID(Index, Preserved, GUID);
+      }
+    }
+    if (isa<AliasSummary>(GVSummary)) {
+      auto *AS = cast<AliasSummary>(GVSummary);
+      auto GUID = AS->getAliasee().getOriginalName();
+      addPreservedGUID(Index, Preserved, GUID);
+    }
+  }
+#else
   auto SummaryList = Index.findGlobalValueSummaryList(GUID);
   if (SummaryList == Index.end())
     return;
@@ -919,6 +962,7 @@ addPreservedGUID(const ModuleSummaryIndex &Index,
       addPreservedGUID(Index, Preserved, GUID);
     }
   }
+#endif
 }
 
 // The main entry point for creating the global ThinLTO analysis. The structure
@@ -939,6 +983,12 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
 
     Ret->ModuleMap[module->identifier] = mem_buffer;
 
+#if LLVM_VERSION_GE(5, 0)
+    if (Error Err = readModuleSummaryIndex(mem_buffer, Ret->Index, i)) {
+      LLVMRustSetLastError(toString(std::move(Err)).c_str());
+      return nullptr;
+    }
+#else
     Expected<std::unique_ptr<object::ModuleSummaryIndexObjectFile>> ObjOrErr =
       object::ModuleSummaryIndexObjectFile::create(mem_buffer);
     if (!ObjOrErr) {
@@ -947,6 +997,7 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
     }
     auto Index = (*ObjOrErr)->takeIndex();
     Ret->Index.mergeFrom(std::move(Index), i);
+#endif
   }
 
   // Collect for each module the list of function it defines (GUID -> Summary)
@@ -965,6 +1016,15 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
   // combined index
   //
   // This is copied from `lib/LTO/ThinLTOCodeGenerator.cpp`
+#if LLVM_VERSION_GE(5, 0)
+  computeDeadSymbols(Ret->Index, Ret->GUIDPreservedSymbols);
+  ComputeCrossModuleImport(
+    Ret->Index,
+    Ret->ModuleToDefinedGVSummaries,
+    Ret->ImportLists,
+    Ret->ExportLists
+  );
+#else
   auto DeadSymbols = computeDeadSymbols(Ret->Index, Ret->GUIDPreservedSymbols);
   ComputeCrossModuleImport(
     Ret->Index,
@@ -973,6 +1033,7 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
     Ret->ExportLists,
     &DeadSymbols
   );
+#endif
 
   // Resolve LinkOnce/Weak symbols, this has to be computed early be cause it
   // impacts the caching.
@@ -981,8 +1042,13 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
   StringMap<std::map<GlobalValue::GUID, GlobalValue::LinkageTypes>> ResolvedODR;
   DenseMap<GlobalValue::GUID, const GlobalValueSummary *> PrevailingCopy;
   for (auto &I : Ret->Index) {
+#if LLVM_VERSION_GE(5, 0)
+    if (I.second.SummaryList.size() > 1)
+      PrevailingCopy[I.first] = getFirstDefinitionForLinker(I.second.SummaryList);
+#else
     if (I.second.size() > 1)
       PrevailingCopy[I.first] = getFirstDefinitionForLinker(I.second);
+#endif
   }
   auto isPrevailing = [&](GlobalValue::GUID GUID, const GlobalValueSummary *S) {
     const auto &Prevailing = PrevailingCopy.find(GUID);
@@ -1131,7 +1197,7 @@ extern "C" bool
 LLVMRustWriteThinBitcodeToFile(LLVMPassManagerRef PMR,
                                LLVMModuleRef M,
                                const char *BcFile) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 struct LLVMRustThinLTOData {
@@ -1145,32 +1211,32 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
                           int num_modules,
                           const char **preserved_symbols,
                           int num_symbols) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" bool
 LLVMRustPrepareThinLTORename(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" bool
 LLVMRustPrepareThinLTOResolveWeak(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" bool
 LLVMRustPrepareThinLTOInternalize(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" bool
 LLVMRustPrepareThinLTOImport(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" void
 LLVMRustFreeThinLTOData(LLVMRustThinLTOData *Data) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 struct LLVMRustThinLTOBuffer {
@@ -1178,22 +1244,22 @@ struct LLVMRustThinLTOBuffer {
 
 extern "C" LLVMRustThinLTOBuffer*
 LLVMRustThinLTOBufferCreate(LLVMModuleRef M) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" void
 LLVMRustThinLTOBufferFree(LLVMRustThinLTOBuffer *Buffer) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" const void*
 LLVMRustThinLTOBufferPtr(const LLVMRustThinLTOBuffer *Buffer) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" size_t
 LLVMRustThinLTOBufferLen(const LLVMRustThinLTOBuffer *Buffer) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 
 extern "C" LLVMModuleRef
@@ -1201,6 +1267,6 @@ LLVMRustParseBitcodeForThinLTO(LLVMContextRef Context,
                                const char *data,
                                size_t len,
                                const char *identifier) {
-  llvm_unreachable("ThinLTO not available");
+  report_fatal_error("ThinLTO not available");
 }
 #endif // LLVM_VERSION_GE(4, 0)

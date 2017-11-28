@@ -34,10 +34,12 @@
 //! both occur before the crate is rendered.
 pub use self::ExternalLocation::*;
 
+#[cfg(stage0)]
 use std::ascii::AsciiExt;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::default::Default;
 use std::error;
 use std::fmt::{self, Display, Formatter, Write as FmtWrite};
@@ -139,6 +141,23 @@ impl SharedContext {
         }
 
         Ok(())
+    }
+}
+
+impl SharedContext {
+    /// Returns whether the `collapse-docs` pass was run on this crate.
+    pub fn was_collapsed(&self) -> bool {
+        self.passes.contains("collapse-docs")
+    }
+
+    /// Based on whether the `collapse-docs` pass was run, return either the `doc_value` or the
+    /// `collapsed_doc_value` of the given item.
+    pub fn maybe_collapsed_doc_value<'a>(&self, item: &'a clean::Item) -> Option<Cow<'a, str>> {
+        if self.was_collapsed() {
+            item.collapsed_doc_value().map(|s| s.into())
+        } else {
+            item.doc_value().map(|s| s.into())
+        }
     }
 }
 
@@ -360,6 +379,7 @@ impl ToJson for IndexItem {
 /// A type used for the search index.
 struct Type {
     name: Option<String>,
+    generics: Option<Vec<String>>,
 }
 
 impl ToJson for Type {
@@ -368,6 +388,9 @@ impl ToJson for Type {
             Some(ref name) => {
                 let mut data = BTreeMap::new();
                 data.insert("name".to_owned(), name.to_json());
+                if let Some(ref generics) = self.generics {
+                    data.insert("generics".to_owned(), generics.to_json());
+                }
                 Json::Object(data)
             },
             None => Json::Null
@@ -419,7 +442,7 @@ fn init_ids() -> FxHashMap<String, usize> {
      "methods",
      "deref-methods",
      "implementations",
-     ].into_iter().map(|id| (String::from(*id), 1)).collect()
+    ].into_iter().map(|id| (String::from(*id), 1)).collect()
 }
 
 /// This method resets the local table of used ID attributes. This is typically
@@ -665,7 +688,6 @@ fn concise_compared_strs(s1: &str, s2: &str) -> (String, String) {
     let s2 = &s2[start_byte..];
     (format!("...{}", concise_str(s1)), format!("...{}", concise_str(s2)))
 }
-
 
 fn print_message(msg: &str, intro_msg: &mut bool, span: &Span, text: &str) {
     if !*intro_msg {
@@ -1253,7 +1275,7 @@ impl DocFolder for Cache {
             clean::FunctionItem(..) | clean::ModuleItem(..) |
             clean::ForeignFunctionItem(..) | clean::ForeignStaticItem(..) |
             clean::ConstantItem(..) | clean::StaticItem(..) |
-            clean::UnionItem(..)
+            clean::UnionItem(..) | clean::ForeignTypeItem
             if !self.stripped_mod => {
                 // Reexported items mean that the same id can show up twice
                 // in the rustdoc ast that we're looking at. We know,
@@ -1288,7 +1310,7 @@ impl DocFolder for Cache {
         // Maintain the parent stack
         let orig_parent_is_trait_impl = self.parent_is_trait_impl;
         let parent_pushed = match item.inner {
-            clean::TraitItem(..) | clean::EnumItem(..) |
+            clean::TraitItem(..) | clean::EnumItem(..) | clean::ForeignTypeItem |
             clean::StructItem(..) | clean::UnionItem(..) => {
                 self.parent_stack.push(item.def_id);
                 self.parent_is_trait_impl = false;
@@ -1325,7 +1347,7 @@ impl DocFolder for Cache {
                 // Figure out the id of this impl. This may map to a
                 // primitive rather than always to a struct/enum.
                 // Note: matching twice to restrict the lifetime of the `i` borrow.
-                let mut dids = vec![];
+                let mut dids = FxHashSet();
                 if let clean::Item { inner: clean::ImplItem(ref i), .. } = item {
                     let masked_trait = i.trait_.def_id().map_or(false,
                         |d| self.masked_crates.contains(&d.krate));
@@ -1335,7 +1357,7 @@ impl DocFolder for Cache {
                             clean::BorrowedRef {
                                 type_: box clean::ResolvedPath { did, .. }, ..
                             } => {
-                                dids.push(did);
+                                dids.insert(did);
                             }
                             ref t => {
                                 let did = t.primitive_type().and_then(|t| {
@@ -1343,7 +1365,7 @@ impl DocFolder for Cache {
                                 });
 
                                 if let Some(did) = did {
-                                    dids.push(did);
+                                    dids.insert(did);
                                 }
                             }
                         }
@@ -1352,7 +1374,7 @@ impl DocFolder for Cache {
                     if let Some(generics) = i.trait_.as_ref().and_then(|t| t.generics()) {
                         for bound in generics {
                             if let Some(did) = bound.def_id() {
-                                dids.push(did);
+                                dids.insert(did);
                             }
                         }
                     }
@@ -1679,7 +1701,7 @@ impl<'a> Item<'a> {
             format!("{}-{}", self.item.source.loline, self.item.source.hiline)
         };
         Some(format!("{root}src/{krate}/{path}#{lines}",
-                     root = root,
+                     root = Escape(&root),
                      krate = krate,
                      path = path,
                      lines = lines))
@@ -1707,6 +1729,7 @@ impl<'a> fmt::Display for Item<'a> {
             clean::PrimitiveItem(..) => write!(fmt, "Primitive Type ")?,
             clean::StaticItem(..) | clean::ForeignStaticItem(..) => write!(fmt, "Static ")?,
             clean::ConstantItem(..) => write!(fmt, "Constant ")?,
+            clean::ForeignTypeItem => write!(fmt, "Foreign Type ")?,
             _ => {
                 // We don't generate pages for any other type.
                 unreachable!();
@@ -1771,6 +1794,7 @@ impl<'a> fmt::Display for Item<'a> {
             clean::StaticItem(ref i) | clean::ForeignStaticItem(ref i) =>
                 item_static(fmt, self.cx, self.item, i),
             clean::ConstantItem(ref c) => item_constant(fmt, self.cx, self.item, c),
+            clean::ForeignTypeItem => item_foreign_type(fmt, self.cx, self.item),
             _ => {
                 // We don't generate pages for any other type.
                 unreachable!();
@@ -1811,6 +1835,9 @@ fn plain_summary_line(s: Option<&str>) -> String {
 }
 
 fn document(w: &mut fmt::Formatter, cx: &Context, item: &clean::Item) -> fmt::Result {
+    if let Some(ref name) = item.name {
+        info!("Documenting {}", name);
+    }
     document_stability(w, cx, item)?;
     let prefix = render_assoc_const_value(item);
     document_full(w, item, cx, &prefix)?;
@@ -1826,37 +1853,32 @@ fn render_markdown(w: &mut fmt::Formatter,
                    prefix: &str,
                    scx: &SharedContext)
                    -> fmt::Result {
-    // We only emit warnings if the user has opted-in to Pulldown rendering.
-    let output = if render_type == RenderType::Pulldown {
-        // Save the state of USED_ID_MAP so it only gets updated once even
-        // though we're rendering twice.
-        let orig_used_id_map = USED_ID_MAP.with(|map| map.borrow().clone());
-        let hoedown_output = format!("{}", Markdown(md_text, RenderType::Hoedown));
-        USED_ID_MAP.with(|map| *map.borrow_mut() = orig_used_id_map);
-        let pulldown_output = format!("{}", Markdown(md_text, RenderType::Pulldown));
-        let mut differences = html_diff::get_differences(&pulldown_output, &hoedown_output);
-        differences.retain(|s| {
-            match *s {
-                html_diff::Difference::NodeText { ref elem_text,
-                                                  ref opposite_elem_text,
-                                                  .. }
-                    if elem_text.split_whitespace().eq(opposite_elem_text.split_whitespace()) => {
-                        false
-                }
-                _ => true,
+    // Save the state of USED_ID_MAP so it only gets updated once even
+    // though we're rendering twice.
+    let orig_used_id_map = USED_ID_MAP.with(|map| map.borrow().clone());
+    let hoedown_output = format!("{}", Markdown(md_text, RenderType::Hoedown));
+    USED_ID_MAP.with(|map| *map.borrow_mut() = orig_used_id_map);
+    let pulldown_output = format!("{}", Markdown(md_text, RenderType::Pulldown));
+    let mut differences = html_diff::get_differences(&pulldown_output, &hoedown_output);
+    differences.retain(|s| {
+        match *s {
+            html_diff::Difference::NodeText { ref elem_text,
+                                              ref opposite_elem_text,
+                                              .. }
+                if elem_text.split_whitespace().eq(opposite_elem_text.split_whitespace()) => {
+                    false
             }
-        });
-
-        if !differences.is_empty() {
-            scx.markdown_warnings.borrow_mut().push((span, md_text.to_owned(), differences));
+            _ => true,
         }
+    });
 
-        pulldown_output
-    } else {
-        format!("{}", Markdown(md_text, RenderType::Hoedown))
-    };
+    if !differences.is_empty() {
+        scx.markdown_warnings.borrow_mut().push((span, md_text.to_owned(), differences));
+    }
 
-    write!(w, "<div class='docblock'>{}{}</div>", prefix, output)
+    write!(w, "<div class='docblock'>{}{}</div>",
+           prefix,
+           if render_type == RenderType::Pulldown { pulldown_output } else { hoedown_output })
 }
 
 fn document_short(w: &mut fmt::Formatter, item: &clean::Item, link: AssocItemLink,
@@ -1892,8 +1914,9 @@ fn render_assoc_const_value(item: &clean::Item) -> String {
 
 fn document_full(w: &mut fmt::Formatter, item: &clean::Item,
                  cx: &Context, prefix: &str) -> fmt::Result {
-    if let Some(s) = item.doc_value() {
-        render_markdown(w, s, item.source.clone(), cx.render_type, prefix, &cx.shared)?;
+    if let Some(s) = cx.shared.maybe_collapsed_doc_value(item) {
+        debug!("Doc block: =====\n{}\n=====", s);
+        render_markdown(w, &*s, item.source.clone(), cx.render_type, prefix, &cx.shared)?;
     } else if !prefix.is_empty() {
         write!(w, "<div class='docblock'>{}</div>", prefix)?;
     }
@@ -1934,7 +1957,7 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
     document(w, cx, item)?;
 
     let mut indices = (0..items.len()).filter(|i| {
-        if let clean::DefaultImplItem(..) = items[*i].inner {
+        if let clean::AutoImplItem(..) = items[*i].inner {
             return false;
         }
         !items[*i].is_stripped()
@@ -2049,6 +2072,7 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
                 ItemType::Primitive       => ("primitives", "Primitive Types"),
                 ItemType::AssociatedType  => ("associated-types", "Associated Types"),
                 ItemType::AssociatedConst => ("associated-consts", "Associated Constants"),
+                ItemType::ForeignType     => ("foreign-types", "Foreign Types"),
             };
             write!(w, "<h2 id='{id}' class='section-header'>\
                        <a href=\"#{id}\">{name}</a></h2>\n<table>",
@@ -2266,7 +2290,7 @@ fn item_function(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                            AbiSpace(f.abi),
                            it.name.as_ref().unwrap(),
                            f.generics).len();
-    write!(w, "<pre class='rust fn'>")?;
+    write!(w, "{}<pre class='rust fn'>", render_spotlight_traits(it)?)?;
     render_attributes(w, it)?;
     write!(w, "{vis}{constness}{unsafety}{abi}fn \
                {name}{generics}{decl}{where_clause}</pre>",
@@ -2400,8 +2424,9 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
         let item_type = m.type_();
         let id = derive_id(format!("{}.{}", item_type, name));
         let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-        write!(w, "<h3 id='{id}' class='method'>\
+        write!(w, "{extra}<h3 id='{id}' class='method'>\
                    <span id='{ns_id}' class='invisible'><code>",
+               extra = render_spotlight_traits(m)?,
                id = id,
                ns_id = ns_id)?;
         render_assoc_item(w, m, AssocItemLink::Anchor(Some(&id)), ItemType::Impl)?;
@@ -2501,7 +2526,7 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
 
         if !foreign.is_empty() {
             write!(w, "
-                <h2 id='foreign-impls' class='section-header'>
+                <h2 id='foreign-impls' class='small-section-header'>
                   Implementations on Foreign Types<a href='#foreign-impls' class='anchor'></a>
                 </h2>
             ")?;
@@ -2603,10 +2628,10 @@ fn assoc_const(w: &mut fmt::Formatter,
     Ok(())
 }
 
-fn assoc_type(w: &mut fmt::Formatter, it: &clean::Item,
-              bounds: &Vec<clean::TyParamBound>,
-              default: Option<&clean::Type>,
-              link: AssocItemLink) -> fmt::Result {
+fn assoc_type<W: fmt::Write>(w: &mut W, it: &clean::Item,
+                             bounds: &Vec<clean::TyParamBound>,
+                             default: Option<&clean::Type>,
+                             link: AssocItemLink) -> fmt::Result {
     write!(w, "type <a href='{}' class=\"type\">{}</a>",
            naive_assoc_href(it, link),
            it.name.as_ref().unwrap())?;
@@ -3211,12 +3236,101 @@ fn render_deref_methods(w: &mut fmt::Formatter, cx: &Context, impl_: &Impl,
     }
 }
 
+fn should_render_item(item: &clean::Item, deref_mut_: bool) -> bool {
+    let self_type_opt = match item.inner {
+        clean::MethodItem(ref method) => method.decl.self_type(),
+        clean::TyMethodItem(ref method) => method.decl.self_type(),
+        _ => None
+    };
+
+    if let Some(self_ty) = self_type_opt {
+        let (by_mut_ref, by_box, by_value) = match self_ty {
+            SelfTy::SelfBorrowed(_, mutability) |
+            SelfTy::SelfExplicit(clean::BorrowedRef { mutability, .. }) => {
+                (mutability == Mutability::Mutable, false, false)
+            },
+            SelfTy::SelfExplicit(clean::ResolvedPath { did, .. }) => {
+                (false, Some(did) == cache().owned_box_did, false)
+            },
+            SelfTy::SelfValue => (false, false, true),
+            _ => (false, false, false),
+        };
+
+        (deref_mut_ || !by_mut_ref) && !by_box && !by_value
+    } else {
+        false
+    }
+}
+
+fn render_spotlight_traits(item: &clean::Item) -> Result<String, fmt::Error> {
+    let mut out = String::new();
+
+    match item.inner {
+        clean::FunctionItem(clean::Function { ref decl, .. }) |
+        clean::TyMethodItem(clean::TyMethod { ref decl, .. }) |
+        clean::MethodItem(clean::Method { ref decl, .. }) |
+        clean::ForeignFunctionItem(clean::Function { ref decl, .. }) => {
+            out = spotlight_decl(decl)?;
+        }
+        _ => {}
+    }
+
+    Ok(out)
+}
+
+fn spotlight_decl(decl: &clean::FnDecl) -> Result<String, fmt::Error> {
+    let mut out = String::new();
+    let mut trait_ = String::new();
+
+    if let Some(did) = decl.output.def_id() {
+        let c = cache();
+        if let Some(impls) = c.impls.get(&did) {
+            for i in impls {
+                let impl_ = i.inner_impl();
+                if impl_.trait_.def_id().and_then(|d| c.traits.get(&d))
+                                        .map_or(false, |t| t.is_spotlight) {
+                    if out.is_empty() {
+                        out.push_str(
+                            &format!("<h3 class=\"important\">Important traits for {}</h3>\
+                                      <code class=\"content\">",
+                                     impl_.for_));
+                        trait_.push_str(&format!("{}", impl_.for_));
+                    }
+
+                    //use the "where" class here to make it small
+                    out.push_str(&format!("<span class=\"where fmt-newline\">{}</span>", impl_));
+                    let t_did = impl_.trait_.def_id().unwrap();
+                    for it in &impl_.items {
+                        if let clean::TypedefItem(ref tydef, _) = it.inner {
+                            out.push_str("<span class=\"where fmt-newline\">    ");
+                            assoc_type(&mut out, it, &vec![],
+                                       Some(&tydef.type_),
+                                       AssocItemLink::GotoSource(t_did, &FxHashSet()))?;
+                            out.push_str(";</span>");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !out.is_empty() {
+        out.insert_str(0, &format!("<div class=\"important-traits\"><div class='tooltip'>ⓘ\
+                                    <span class='tooltiptext'>Important traits for {}</span></div>\
+                                    <div class=\"content hidden\">",
+                                   trait_));
+        out.push_str("</code></div></div>");
+    }
+
+    Ok(out)
+}
+
 fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLink,
                render_mode: RenderMode, outer_version: Option<&str>,
                show_def_docs: bool) -> fmt::Result {
     if render_mode == RenderMode::Normal {
         let id = derive_id(match i.inner_impl().trait_ {
-            Some(ref t) => format!("impl-{}", Escape(&format!("{:#}", t))),
+            Some(ref t) => format!("impl-{}", small_url_encode(&format!("{:#}", t))),
             None => "impl".to_string(),
         });
         write!(w, "<h3 id='{}' class='impl'><span class='in-band'><code>{}</code>",
@@ -3234,8 +3348,8 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
         }
         write!(w, "</span>")?;
         write!(w, "</h3>\n")?;
-        if let Some(ref dox) = i.impl_item.doc_value() {
-            write!(w, "<div class='docblock'>{}</div>", Markdown(dox, cx.render_type))?;
+        if let Some(ref dox) = cx.shared.maybe_collapsed_doc_value(&i.impl_item) {
+            write!(w, "<div class='docblock'>{}</div>", Markdown(&*dox, cx.render_type))?;
         }
     }
 
@@ -3248,39 +3362,18 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
 
         let render_method_item: bool = match render_mode {
             RenderMode::Normal => true,
-            RenderMode::ForDeref { mut_: deref_mut_ } => {
-                let self_type_opt = match item.inner {
-                    clean::MethodItem(ref method) => method.decl.self_type(),
-                    clean::TyMethodItem(ref method) => method.decl.self_type(),
-                    _ => None
-                };
-
-                if let Some(self_ty) = self_type_opt {
-                    let (by_mut_ref, by_box) = match self_ty {
-                        SelfTy::SelfBorrowed(_, mutability) |
-                        SelfTy::SelfExplicit(clean::BorrowedRef { mutability, .. }) => {
-                            (mutability == Mutability::Mutable, false)
-                        },
-                        SelfTy::SelfExplicit(clean::ResolvedPath { did, .. }) => {
-                            (false, Some(did) == cache().owned_box_did)
-                        },
-                        _ => (false, false),
-                    };
-
-                    (deref_mut_ || !by_mut_ref) && !by_box
-                } else {
-                    false
-                }
-            },
+            RenderMode::ForDeref { mut_: deref_mut_ } => should_render_item(&item, deref_mut_),
         };
 
         match item.inner {
-            clean::MethodItem(..) | clean::TyMethodItem(..) => {
+            clean::MethodItem(clean::Method { ref decl, .. }) |
+            clean::TyMethodItem(clean::TyMethod{ ref decl, .. }) => {
                 // Only render when the method is not static or we allow static methods
                 if render_method_item {
                     let id = derive_id(format!("{}.{}", item_type, name));
                     let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
                     write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
+                    write!(w, "{}", spotlight_decl(decl)?)?;
                     write!(w, "<span id='{}' class='invisible'>", ns_id)?;
                     write!(w, "<code>")?;
                     render_assoc_item(w, item, link.anchor(&id), ItemType::Impl)?;
@@ -3327,6 +3420,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
 
         if render_method_item || render_mode == RenderMode::Normal {
             let prefix = render_assoc_const_value(item);
+
             if !is_default_item {
                 if let Some(t) = trait_ {
                     // The trait item may have been stripped so we might not
@@ -3427,6 +3521,21 @@ fn item_typedef(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     render_assoc_items(w, cx, it, it.def_id, AssocItemRender::All)
 }
 
+fn item_foreign_type(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item) -> fmt::Result {
+    writeln!(w, "<pre class='rust foreigntype'>extern {{")?;
+    render_attributes(w, it)?;
+    write!(
+        w,
+        "    {}type {};\n}}</pre>",
+        VisSpace(&it.visibility),
+        it.name.as_ref().unwrap(),
+    )?;
+
+    document(w, cx, it)?;
+
+    render_assoc_items(w, cx, it, it.def_id, AssocItemRender::All)
+}
+
 impl<'a> fmt::Display for Sidebar<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let cx = self.cx;
@@ -3444,6 +3553,7 @@ impl<'a> fmt::Display for Sidebar<'a> {
                 clean::UnionItem(..) => write!(fmt, "Union ")?,
                 clean::EnumItem(..) => write!(fmt, "Enum ")?,
                 clean::TypedefItem(..) => write!(fmt, "Type Definition ")?,
+                clean::ForeignTypeItem => write!(fmt, "Foreign Type ")?,
                 clean::ModuleItem(..) => if it.is_crate() {
                     write!(fmt, "Crate ")?;
                 } else {
@@ -3472,6 +3582,7 @@ impl<'a> fmt::Display for Sidebar<'a> {
                 clean::EnumItem(ref e) => sidebar_enum(fmt, it, e)?,
                 clean::TypedefItem(ref t, _) => sidebar_typedef(fmt, it, t)?,
                 clean::ModuleItem(ref m) => sidebar_module(fmt, it, &m.items)?,
+                clean::ForeignTypeItem => sidebar_foreign_type(fmt, it)?,
                 _ => (),
             }
         }
@@ -3518,12 +3629,48 @@ impl<'a> fmt::Display for Sidebar<'a> {
     }
 }
 
+fn get_methods(i: &clean::Impl, for_deref: bool) -> Vec<String> {
+    i.items.iter().filter_map(|item| {
+        match item.name {
+            // Maybe check with clean::Visibility::Public as well?
+            Some(ref name) if !name.is_empty() && item.visibility.is_some() && item.is_method() => {
+                if !for_deref || should_render_item(item, false) {
+                    Some(format!("<a href=\"#method.{name}\">{name}</a>", name = name))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }).collect::<Vec<_>>()
+}
+
+// The point is to url encode any potential character from a type with genericity.
+fn small_url_encode(s: &str) -> String {
+    s.replace("<", "%3C")
+     .replace(">", "%3E")
+     .replace(" ", "%20")
+     .replace("?", "%3F")
+     .replace("'", "%27")
+     .replace("&", "%26")
+     .replace(",", "%2C")
+     .replace(":", "%3A")
+     .replace(";", "%3B")
+     .replace("[", "%5B")
+     .replace("]", "%5D")
+}
+
 fn sidebar_assoc_items(it: &clean::Item) -> String {
     let mut out = String::new();
     let c = cache();
     if let Some(v) = c.impls.get(&it.def_id) {
-        if v.iter().any(|i| i.inner_impl().trait_.is_none()) {
-            out.push_str("<li><a href=\"#methods\">Methods</a></li>");
+        let ret = v.iter()
+                   .filter(|i| i.inner_impl().trait_.is_none())
+                   .flat_map(|i| get_methods(i.inner_impl(), false))
+                   .collect::<String>();
+        if !ret.is_empty() {
+            out.push_str(&format!("<a class=\"sidebar-title\" href=\"#methods\">Methods\
+                                   </a><div class=\"sidebar-links\">{}</div>", ret));
         }
 
         if v.iter().any(|i| i.inner_impl().trait_.is_some()) {
@@ -3539,16 +3686,47 @@ fn sidebar_assoc_items(it: &clean::Item) -> String {
                     let inner_impl = target.def_id().or(target.primitive_type().and_then(|prim| {
                         c.primitive_locations.get(&prim).cloned()
                     })).and_then(|did| c.impls.get(&did));
-                    if inner_impl.is_some() {
-                        out.push_str("<li><a href=\"#deref-methods\">");
+                    if let Some(impls) = inner_impl {
+                        out.push_str("<a class=\"sidebar-title\" href=\"#deref-methods\">");
                         out.push_str(&format!("Methods from {:#}&lt;Target={:#}&gt;",
-                                                  impl_.inner_impl().trait_.as_ref().unwrap(),
-                                                  target));
-                        out.push_str("</a></li>");
+                                              impl_.inner_impl().trait_.as_ref().unwrap(),
+                                              target));
+                        out.push_str("</a>");
+                        let ret = impls.iter()
+                                       .filter(|i| i.inner_impl().trait_.is_none())
+                                       .flat_map(|i| get_methods(i.inner_impl(), true))
+                                       .collect::<String>();
+                        out.push_str(&format!("<div class=\"sidebar-links\">{}</div>", ret));
                     }
                 }
             }
-            out.push_str("<li><a href=\"#implementations\">Trait Implementations</a></li>");
+            let mut links = HashSet::new();
+            let ret = v.iter()
+                       .filter_map(|i| {
+                           let is_negative_impl = is_negative_impl(i.inner_impl());
+                           if let Some(ref i) = i.inner_impl().trait_ {
+                               let i_display = format!("{:#}", i);
+                               let out = Escape(&i_display);
+                               let encoded = small_url_encode(&format!("{:#}", i));
+                               let generated = format!("<a href=\"#impl-{}\">{}{}</a>",
+                                                       encoded,
+                                                       if is_negative_impl { "!" } else { "" },
+                                                       out);
+                               if !links.contains(&generated) && links.insert(generated.clone()) {
+                                   Some(generated)
+                               } else {
+                                   None
+                               }
+                           } else {
+                               None
+                           }
+                       })
+                       .collect::<String>();
+            if !ret.is_empty() {
+                out.push_str("<a class=\"sidebar-title\" href=\"#implementations\">\
+                              Trait Implementations</a>");
+                out.push_str(&format!("<div class=\"sidebar-links\">{}</div>", ret));
+            }
         }
     }
 
@@ -3558,60 +3736,147 @@ fn sidebar_assoc_items(it: &clean::Item) -> String {
 fn sidebar_struct(fmt: &mut fmt::Formatter, it: &clean::Item,
                   s: &clean::Struct) -> fmt::Result {
     let mut sidebar = String::new();
+    let fields = get_struct_fields_name(&s.fields);
 
-    if s.fields.iter()
-               .any(|f| if let clean::StructFieldItem(..) = f.inner { true } else { false }) {
+    if !fields.is_empty() {
         if let doctree::Plain = s.struct_type {
-            sidebar.push_str("<li><a href=\"#fields\">Fields</a></li>");
+            sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#fields\">Fields</a>\
+                                       <div class=\"sidebar-links\">{}</div>", fields));
         }
     }
 
     sidebar.push_str(&sidebar_assoc_items(it));
 
     if !sidebar.is_empty() {
-        write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
+}
+
+fn extract_for_impl_name(item: &clean::Item) -> Option<(String, String)> {
+    match item.inner {
+        clean::ItemEnum::ImplItem(ref i) => {
+            if let Some(ref trait_) = i.trait_ {
+                Some((format!("{:#}", i.for_), format!("{:#}", trait_)))
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+fn is_negative_impl(i: &clean::Impl) -> bool {
+    i.polarity == Some(clean::ImplPolarity::Negative)
 }
 
 fn sidebar_trait(fmt: &mut fmt::Formatter, it: &clean::Item,
                  t: &clean::Trait) -> fmt::Result {
     let mut sidebar = String::new();
 
-    let has_types = t.items.iter().any(|m| m.is_associated_type());
-    let has_consts = t.items.iter().any(|m| m.is_associated_const());
-    let has_required = t.items.iter().any(|m| m.is_ty_method());
-    let has_provided = t.items.iter().any(|m| m.is_method());
+    let types = t.items
+                 .iter()
+                 .filter_map(|m| {
+                     match m.name {
+                         Some(ref name) if m.is_associated_type() => {
+                             Some(format!("<a href=\"#associatedtype.{name}\">{name}</a>",
+                                          name=name))
+                         }
+                         _ => None,
+                     }
+                 })
+                 .collect::<String>();
+    let consts = t.items
+                  .iter()
+                  .filter_map(|m| {
+                      match m.name {
+                          Some(ref name) if m.is_associated_const() => {
+                              Some(format!("<a href=\"#associatedconstant.{name}\">{name}</a>",
+                                           name=name))
+                          }
+                          _ => None,
+                      }
+                  })
+                  .collect::<String>();
+    let required = t.items
+                    .iter()
+                    .filter_map(|m| {
+                        match m.name {
+                            Some(ref name) if m.is_ty_method() => {
+                                Some(format!("<a href=\"#tymethod.{name}\">{name}</a>",
+                                             name=name))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect::<String>();
+    let provided = t.items
+                    .iter()
+                    .filter_map(|m| {
+                        match m.name {
+                            Some(ref name) if m.is_method() => {
+                                Some(format!("<a href=\"#method.{name}\">{name}</a>", name=name))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect::<String>();
 
-    if has_types {
-        sidebar.push_str("<li><a href=\"#associated-types\">Associated Types</a></li>");
+    if !types.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#associated-types\">\
+                                   Associated Types</a><div class=\"sidebar-links\">{}</div>",
+                                  types));
     }
-    if has_consts {
-        sidebar.push_str("<li><a href=\"#associated-const\">Associated Constants</a></li>");
+    if !consts.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#associated-const\">\
+                                   Associated Constants</a><div class=\"sidebar-links\">{}</div>",
+                                  consts));
     }
-    if has_required {
-        sidebar.push_str("<li><a href=\"#required-methods\">Required Methods</a></li>");
+    if !required.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#required-methods\">\
+                                   Required Methods</a><div class=\"sidebar-links\">{}</div>",
+                                  required));
     }
-    if has_provided {
-        sidebar.push_str("<li><a href=\"#provided-methods\">Provided Methods</a></li>");
+    if !provided.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#provided-methods\">\
+                                   Provided Methods</a><div class=\"sidebar-links\">{}</div>",
+                                  provided));
     }
-
-    sidebar.push_str(&sidebar_assoc_items(it));
 
     let c = cache();
 
     if let Some(implementors) = c.implementors.get(&it.def_id) {
-        if implementors.iter().any(|i| i.impl_.for_.def_id()
-                                   .map_or(false, |d| !c.paths.contains_key(&d)))
-        {
-            sidebar.push_str("<li><a href=\"#foreign-impls\">\
-                             Implementations on Foreign Types</a></li>");
+        let res = implementors.iter()
+                              .filter(|i| i.impl_.for_.def_id()
+                                                      .map_or(false, |d| !c.paths.contains_key(&d)))
+                              .filter_map(|i| {
+                                  if let Some(item) = implementor2item(&c, i) {
+                                      match extract_for_impl_name(&item) {
+                                          Some((ref name, ref url)) => {
+                                              Some(format!("<a href=\"#impl-{}\">{}</a>",
+                                                           small_url_encode(url),
+                                                           Escape(name)))
+                                          }
+                                          _ => None,
+                                      }
+                                  } else {
+                                      None
+                                  }
+                              })
+                              .collect::<String>();
+        if !res.is_empty() {
+            sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#foreign-impls\">\
+                                       Implementations on Foreign Types</a><div \
+                                       class=\"sidebar-links\">{}</div>",
+                                      res));
         }
     }
 
-    sidebar.push_str("<li><a href=\"#implementors\">Implementors</a></li>");
+    sidebar.push_str("<a class=\"sidebar-title\" href=\"#implementors\">Implementors</a>");
 
-    write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)
+    sidebar.push_str(&sidebar_assoc_items(it));
+
+    write!(fmt, "<div class=\"block items\">{}</div>", sidebar)
 }
 
 fn sidebar_primitive(fmt: &mut fmt::Formatter, it: &clean::Item,
@@ -3619,7 +3884,7 @@ fn sidebar_primitive(fmt: &mut fmt::Formatter, it: &clean::Item,
     let sidebar = sidebar_assoc_items(it);
 
     if !sidebar.is_empty() {
-        write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
 }
@@ -3629,24 +3894,40 @@ fn sidebar_typedef(fmt: &mut fmt::Formatter, it: &clean::Item,
     let sidebar = sidebar_assoc_items(it);
 
     if !sidebar.is_empty() {
-        write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
+}
+
+fn get_struct_fields_name(fields: &[clean::Item]) -> String {
+    fields.iter()
+          .filter(|f| if let clean::StructFieldItem(..) = f.inner {
+              true
+          } else {
+              false
+          })
+          .filter_map(|f| match f.name {
+              Some(ref name) => Some(format!("<a href=\"#structfield.{name}\">\
+                                              {name}</a>", name=name)),
+              _ => None,
+          })
+          .collect()
 }
 
 fn sidebar_union(fmt: &mut fmt::Formatter, it: &clean::Item,
                  u: &clean::Union) -> fmt::Result {
     let mut sidebar = String::new();
+    let fields = get_struct_fields_name(&u.fields);
 
-    if u.fields.iter()
-               .any(|f| if let clean::StructFieldItem(..) = f.inner { true } else { false }) {
-        sidebar.push_str("<li><a href=\"#fields\">Fields</a></li>");
+    if !fields.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#fields\">Fields</a>\
+                                   <div class=\"sidebar-links\">{}</div>", fields));
     }
 
     sidebar.push_str(&sidebar_assoc_items(it));
 
     if !sidebar.is_empty() {
-        write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
 }
@@ -3655,14 +3936,22 @@ fn sidebar_enum(fmt: &mut fmt::Formatter, it: &clean::Item,
                 e: &clean::Enum) -> fmt::Result {
     let mut sidebar = String::new();
 
-    if !e.variants.is_empty() {
-        sidebar.push_str("<li><a href=\"#variants\">Variants</a></li>");
+    let variants = e.variants.iter()
+                             .filter_map(|v| match v.name {
+                                 Some(ref name) => Some(format!("<a href=\"#variant.{name}\">{name}\
+                                                                 </a>", name = name)),
+                                 _ => None,
+                             })
+                             .collect::<String>();
+    if !variants.is_empty() {
+        sidebar.push_str(&format!("<a class=\"sidebar-title\" href=\"#variants\">Variants</a>\
+                                   <div class=\"sidebar-links\">{}</div>", variants));
     }
 
     sidebar.push_str(&sidebar_assoc_items(it));
 
     if !sidebar.is_empty() {
-        write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
 }
@@ -3684,9 +3973,9 @@ fn sidebar_module(fmt: &mut fmt::Formatter, _it: &clean::Item,
                    ItemType::Enum, ItemType::Constant, ItemType::Static, ItemType::Trait,
                    ItemType::Function, ItemType::Typedef, ItemType::Union, ItemType::Impl,
                    ItemType::TyMethod, ItemType::Method, ItemType::StructField, ItemType::Variant,
-                   ItemType::AssociatedType, ItemType::AssociatedConst] {
+                   ItemType::AssociatedType, ItemType::AssociatedConst, ItemType::ForeignType] {
         if items.iter().any(|it| {
-            if let clean::DefaultImplItem(..) = it.inner {
+            if let clean::AutoImplItem(..) = it.inner {
                 false
             } else {
                 !it.is_stripped() && it.type_() == myty
@@ -3713,6 +4002,7 @@ fn sidebar_module(fmt: &mut fmt::Formatter, _it: &clean::Item,
                 ItemType::Primitive       => ("primitives", "Primitive Types"),
                 ItemType::AssociatedType  => ("associated-types", "Associated Types"),
                 ItemType::AssociatedConst => ("associated-consts", "Associated Constants"),
+                ItemType::ForeignType     => ("foreign-types", "Foreign Types"),
             };
             sidebar.push_str(&format!("<li><a href=\"#{id}\">{name}</a></li>",
                                       id = short,
@@ -3722,6 +4012,14 @@ fn sidebar_module(fmt: &mut fmt::Formatter, _it: &clean::Item,
 
     if !sidebar.is_empty() {
         write!(fmt, "<div class=\"block items\"><ul>{}</ul></div>", sidebar)?;
+    }
+    Ok(())
+}
+
+fn sidebar_foreign_type(fmt: &mut fmt::Formatter, it: &clean::Item) -> fmt::Result {
+    let sidebar = sidebar_assoc_items(it);
+    if !sidebar.is_empty() {
+        write!(fmt, "<div class=\"block items\">{}</div>", sidebar)?;
     }
     Ok(())
 }
@@ -3788,21 +4086,40 @@ fn get_index_search_type(item: &clean::Item) -> Option<IndexItemFunctionType> {
 }
 
 fn get_index_type(clean_type: &clean::Type) -> Type {
-    Type { name: get_index_type_name(clean_type).map(|s| s.to_ascii_lowercase()) }
+    let t = Type {
+        name: get_index_type_name(clean_type, true).map(|s| s.to_ascii_lowercase()),
+        generics: get_generics(clean_type),
+    };
+    t
 }
 
-fn get_index_type_name(clean_type: &clean::Type) -> Option<String> {
+fn get_index_type_name(clean_type: &clean::Type, accept_generic: bool) -> Option<String> {
     match *clean_type {
         clean::ResolvedPath { ref path, .. } => {
             let segments = &path.segments;
             Some(segments[segments.len() - 1].name.clone())
-        },
-        clean::Generic(ref s) => Some(s.clone()),
+        }
+        clean::Generic(ref s) if accept_generic => Some(s.clone()),
         clean::Primitive(ref p) => Some(format!("{:?}", p)),
-        clean::BorrowedRef { ref type_, .. } => get_index_type_name(type_),
+        clean::BorrowedRef { ref type_, .. } => get_index_type_name(type_, accept_generic),
         // FIXME: add all from clean::Type.
         _ => None
     }
+}
+
+fn get_generics(clean_type: &clean::Type) -> Option<Vec<String>> {
+    clean_type.generics()
+              .and_then(|types| {
+                  let r = types.iter()
+                               .filter_map(|t| get_index_type_name(t, false))
+                               .map(|s| s.to_ascii_lowercase())
+                               .collect::<Vec<_>>();
+                  if r.is_empty() {
+                      None
+                  } else {
+                      Some(r)
+                  }
+              })
 }
 
 pub fn cache() -> Arc<Cache> {

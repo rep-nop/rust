@@ -30,7 +30,7 @@ use syntax::ast;
 use syntax_pos::{Span, DUMMY_SP};
 
 pub use self::coherence::{orphan_check, overlapping_impls, OrphanCheckErr, OverlapResult};
-pub use self::fulfill::{FulfillmentContext, RegionObligation};
+pub use self::fulfill::FulfillmentContext;
 pub use self::project::MismatchedProjectionTypes;
 pub use self::project::{normalize, normalize_projection_type, Normalized};
 pub use self::project::{ProjectionCache, ProjectionCacheSnapshot, Reveal};
@@ -152,7 +152,6 @@ pub enum ObligationCauseCode<'tcx> {
         item_name: ast::Name,
         impl_item_def_id: DefId,
         trait_item_def_id: DefId,
-        lint_id: Option<ast::NodeId>,
     },
 
     /// Checking that this expression can be assigned where it needs to be
@@ -288,11 +287,11 @@ pub enum Vtable<'tcx, N> {
     /// Vtable identifying a particular impl.
     VtableImpl(VtableImplData<'tcx, N>),
 
-    /// Vtable for default trait implementations
+    /// Vtable for auto trait implementations
     /// This carries the information and nested obligations with regards
-    /// to a default implementation for a trait `Trait`. The nested obligations
+    /// to an auto implementation for a trait `Trait`. The nested obligations
     /// ensure the trait implementation holds for all the constituent types.
-    VtableDefaultImpl(VtableDefaultImplData<N>),
+    VtableAutoImpl(VtableAutoImplData<N>),
 
     /// Successful resolution to an obligation provided by the caller
     /// for some type parameter. The `Vec<N>` represents the
@@ -354,7 +353,7 @@ pub struct VtableClosureData<'tcx, N> {
 }
 
 #[derive(Clone)]
-pub struct VtableDefaultImplData<N> {
+pub struct VtableAutoImplData<N> {
     pub trait_def_id: DefId,
     pub nested: Vec<N>
 }
@@ -537,6 +536,17 @@ pub fn normalize_param_env_or_error<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
         let region_scope_tree = region::ScopeTree::default();
         let free_regions = FreeRegionMap::new();
+
+        // FIXME. We should really... do something with these region
+        // obligations. But this call just continues the older
+        // behavior (i.e., doesn't cause any new bugs), and it would
+        // take some further refactoring to actually solve them. In
+        // particular, we would have to handle implied bounds
+        // properly, and that code is currently largely confined to
+        // regionck (though I made some efforts to extract it
+        // out). -nmatsakis
+        let _ = infcx.ignore_region_obligations();
+
         infcx.resolve_regions_and_report_errors(region_context, &region_scope_tree, &free_regions);
         let predicates = match infcx.fully_resolve(&predicates) {
             Ok(predicates) => predicates,
@@ -758,7 +768,7 @@ impl<'tcx, N> Vtable<'tcx, N> {
             VtableImpl(i) => i.nested,
             VtableParam(n) => n,
             VtableBuiltin(i) => i.nested,
-            VtableDefaultImpl(d) => d.nested,
+            VtableAutoImpl(d) => d.nested,
             VtableClosure(c) => c.nested,
             VtableGenerator(c) => c.nested,
             VtableObject(d) => d.nested,
@@ -771,7 +781,7 @@ impl<'tcx, N> Vtable<'tcx, N> {
             &mut VtableImpl(ref mut i) => &mut i.nested,
             &mut VtableParam(ref mut n) => n,
             &mut VtableBuiltin(ref mut i) => &mut i.nested,
-            &mut VtableDefaultImpl(ref mut d) => &mut d.nested,
+            &mut VtableAutoImpl(ref mut d) => &mut d.nested,
             &mut VtableGenerator(ref mut c) => &mut c.nested,
             &mut VtableClosure(ref mut c) => &mut c.nested,
             &mut VtableObject(ref mut d) => &mut d.nested,
@@ -795,7 +805,7 @@ impl<'tcx, N> Vtable<'tcx, N> {
                 vtable_base: o.vtable_base,
                 nested: o.nested.into_iter().map(f).collect(),
             }),
-            VtableDefaultImpl(d) => VtableDefaultImpl(VtableDefaultImplData {
+            VtableAutoImpl(d) => VtableAutoImpl(VtableAutoImplData {
                 trait_def_id: d.trait_def_id,
                 nested: d.nested.into_iter().map(f).collect(),
             }),
@@ -833,17 +843,6 @@ impl<'tcx> TraitObligation<'tcx> {
 }
 
 pub fn provide(providers: &mut ty::maps::Providers) {
-    *providers = ty::maps::Providers {
-        is_object_safe: object_safety::is_object_safe_provider,
-        specialization_graph_of: specialize::specialization_graph_provider,
-        specializes: specialize::specializes,
-        trans_fulfill_obligation: trans::trans_fulfill_obligation,
-        vtable_methods,
-        ..*providers
-    };
-}
-
-pub fn provide_extern(providers: &mut ty::maps::Providers) {
     *providers = ty::maps::Providers {
         is_object_safe: object_safety::is_object_safe_provider,
         specialization_graph_of: specialize::specialization_graph_provider,

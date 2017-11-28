@@ -14,9 +14,9 @@ use syntax_pos::Span;
 
 use rustc::ty::{self, TyCtxt};
 use rustc::mir::{self, Mir, Location};
-use rustc::mir::transform::{MirPass, MirSource};
 use rustc_data_structures::indexed_set::IdxSetBuf;
 use rustc_data_structures::indexed_vec::Idx;
+use transform::{MirPass, MirSource};
 
 use dataflow::do_dataflow;
 use dataflow::MoveDataParamEnv;
@@ -34,8 +34,8 @@ pub struct SanityCheck;
 impl MirPass for SanityCheck {
     fn run_pass<'a, 'tcx>(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           src: MirSource, mir: &mut Mir<'tcx>) {
-        let id = src.item_id();
-        let def_id = tcx.hir.local_def_id(id);
+        let def_id = src.def_id;
+        let id = tcx.hir.as_local_node_id(def_id).unwrap();
         if !tcx.has_attr(def_id, "rustc_mir_borrowck") {
             debug!("skipping rustc_peek::SanityCheck on {}", tcx.item_path_str(def_id));
             return;
@@ -45,7 +45,7 @@ impl MirPass for SanityCheck {
 
         let attributes = tcx.get_attrs(def_id);
         let param_env = tcx.param_env(def_id);
-        let move_data = MoveData::gather_moves(mir, tcx, param_env).unwrap();
+        let move_data = MoveData::gather_moves(mir, tcx).unwrap();
         let mdpe = MoveDataParamEnv { move_data: move_data, param_env: param_env };
         let dead_unwinds = IdxSetBuf::new_empty(mir.basic_blocks().len());
         let flow_inits =
@@ -124,7 +124,8 @@ fn each_block<'a, 'tcx, O>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     };
     assert!(args.len() == 1);
     let peek_arg_lval = match args[0] {
-        mir::Operand::Consume(ref lval @ mir::Lvalue::Local(_)) => Some(lval),
+        mir::Operand::Copy(ref lval @ mir::Lvalue::Local(_)) |
+        mir::Operand::Move(ref lval @ mir::Lvalue::Local(_)) => Some(lval),
         _ => None,
     };
 

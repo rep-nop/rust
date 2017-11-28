@@ -29,7 +29,7 @@ use rustc::middle::dataflow::BitwiseOperator;
 use rustc::middle::dataflow::DataFlowOperator;
 use rustc::middle::dataflow::KillFrom;
 use rustc::middle::borrowck::BorrowCheckResult;
-use rustc::hir::def_id::{DefId, DefIndex};
+use rustc::hir::def_id::{DefId, LocalDefId};
 use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization as mc;
 use rustc::middle::mem_categorization::Categorization;
@@ -47,7 +47,7 @@ use std::rc::Rc;
 use std::hash::{Hash, Hasher};
 use syntax::ast;
 use syntax_pos::{MultiSpan, Span};
-use errors::DiagnosticBuilder;
+use errors::{DiagnosticBuilder, DiagnosticId};
 
 use rustc::hir;
 use rustc::hir::intravisit::{self, Visitor};
@@ -256,7 +256,7 @@ impl<'b, 'tcx: 'b> BorrowckErrors for BorrowckCtxt<'b, 'tcx> {
     fn struct_span_err_with_code<'a, S: Into<MultiSpan>>(&'a self,
                                                          sp: S,
                                                          msg: &str,
-                                                         code: &str)
+                                                         code: DiagnosticId)
                                                          -> DiagnosticBuilder<'a>
     {
         self.tcx.sess.struct_span_err_with_code(sp, msg, code)
@@ -268,6 +268,17 @@ impl<'b, 'tcx: 'b> BorrowckErrors for BorrowckCtxt<'b, 'tcx> {
                                                -> DiagnosticBuilder<'a>
     {
         self.tcx.sess.struct_span_err(sp, msg)
+    }
+
+    fn cancel_if_wrong_origin<'a>(&'a self,
+                                mut diag: DiagnosticBuilder<'a>,
+                                o: Origin)
+                                -> DiagnosticBuilder<'a>
+    {
+        if !o.should_emit_errors(self.tcx.sess.opts.borrowck_mode) {
+            self.tcx.sess.diagnostic().cancel(&mut diag);
+        }
+        diag
     }
 }
 
@@ -376,9 +387,9 @@ pub enum LoanPathElem<'tcx> {
     LpInterior(Option<DefId>, InteriorKind),
 }
 
-fn closure_to_block(closure_id: DefIndex,
+fn closure_to_block(closure_id: LocalDefId,
                     tcx: TyCtxt) -> ast::NodeId {
-    let closure_id = tcx.hir.def_index_to_node_id(closure_id);
+    let closure_id = tcx.hir.local_def_id_to_node_id(closure_id);
     match tcx.hir.get(closure_id) {
         hir_map::NodeExpr(expr) => match expr.node {
             hir::ExprClosure(.., body_id, _, _) => {
@@ -655,10 +666,8 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                     ty::TypeVariants::TyClosure(id, _) => {
                         let node_id = self.tcx.hir.as_local_node_id(id).unwrap();
                         let hir_id = self.tcx.hir.node_to_hir_id(node_id);
-                        if let Some(&(ty::ClosureKind::FnOnce, Some((span, name)))) =
-                            self.tables.closure_kinds().get(hir_id)
-                        {
-                            err.span_note(span, &format!(
+                        if let Some((span, name)) = self.tables.closure_kind_origins().get(hir_id) {
+                            err.span_note(*span, &format!(
                                 "closure cannot be invoked more than once because \
                                 it moves the variable `{}` out of its environment",
                                 name
@@ -744,7 +753,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
         let mut err = self.cannot_reassign_immutable(span,
                                                      &self.loan_path_to_string(lp),
                                                      Origin::Ast);
-        err.span_label(span, "re-assignment of immutable variable");
+        err.span_label(span, "cannot assign twice to immutable variable");
         if span != assign.span {
             err.span_label(assign.span, format!("first assignment to `{}`",
                                               self.loan_path_to_string(lp)));
@@ -755,12 +764,17 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
     pub fn struct_span_err_with_code<S: Into<MultiSpan>>(&self,
                                                          s: S,
                                                          msg: &str,
-                                                         code: &str)
+                                                         code: DiagnosticId)
                                                          -> DiagnosticBuilder<'a> {
         self.tcx.sess.struct_span_err_with_code(s, msg, code)
     }
 
-    pub fn span_err_with_code<S: Into<MultiSpan>>(&self, s: S, msg: &str, code: &str) {
+    pub fn span_err_with_code<S: Into<MultiSpan>>(
+        &self,
+        s: S,
+        msg: &str,
+        code: DiagnosticId,
+    ) {
         self.tcx.sess.span_err_with_code(s, msg, code);
     }
 
@@ -1096,7 +1110,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                 } else {
                     "consider changing this closure to take self by mutable reference"
                 };
-                let node_id = self.tcx.hir.def_index_to_node_id(id);
+                let node_id = self.tcx.hir.local_def_id_to_node_id(id);
                 let help_span = self.tcx.hir.span(node_id);
                 self.cannot_act_on_capture_in_sharable_fn(span,
                                                           prefix,
@@ -1292,7 +1306,7 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                 };
                 if kind == ty::ClosureKind::Fn {
                     let closure_node_id =
-                        self.tcx.hir.def_index_to_node_id(upvar_id.closure_expr_id);
+                        self.tcx.hir.local_def_id_to_node_id(upvar_id.closure_expr_id);
                     db.span_help(self.tcx.hir.span(closure_node_id),
                                  "consider changing this closure to take \
                                   self by mutable reference");

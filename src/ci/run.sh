@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright 2016 The Rust Project Developers. See the COPYRIGHT
 # file at the top-level directory of this distribution and at
 # http://rust-lang.org/COPYRIGHT.
@@ -37,7 +37,7 @@ if [ "$DIST_SRC" = "" ]; then
 fi
 
 # If we're deploying artifacts then we set the release channel, otherwise if
-# we're not deploying then we want to be sure to enable all assertions becauase
+# we're not deploying then we want to be sure to enable all assertions because
 # we'll be running tests
 #
 # FIXME: need a scheme for changing this `nightly` value to `beta` and `stable`
@@ -49,7 +49,7 @@ if [ "$DEPLOY$DEPLOY_ALT" != "" ]; then
   if [ "$NO_LLVM_ASSERTIONS" = "1" ]; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-llvm-assertions"
   elif [ "$DEPLOY_ALT" != "" ]; then
-    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-llvm-assertions"
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-llvm-assertions"
   fi
 else
   # We almost always want debug assertions enabled, but sometimes this takes too

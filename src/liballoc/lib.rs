@@ -83,6 +83,7 @@
 #![cfg_attr(not(test), feature(generator_trait))]
 #![cfg_attr(test, feature(rand, test))]
 #![feature(allow_internal_unstable)]
+#![feature(ascii_ctype)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(cfg_target_has_atomic)]
@@ -93,6 +94,7 @@
 #![feature(dropck_eyepatch)]
 #![feature(exact_size_is_empty)]
 #![feature(fmt_internals)]
+#![feature(from_ref)]
 #![feature(fundamental)]
 #![feature(fused)]
 #![feature(generic_param_attrs)]
@@ -133,6 +135,8 @@
 extern crate std;
 #[cfg(test)]
 extern crate test;
+#[cfg(test)]
+extern crate rand;
 
 extern crate std_unicode;
 

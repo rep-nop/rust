@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-wasm32-bare compiled with panic=abort by default
+
 #![feature(box_syntax)]
 
 fn main() {
@@ -28,7 +30,7 @@ impl Drop for S {
 }
 
 // END RUST SOURCE
-// START rustc.node4.ElaborateDrops.before.mir
+// START rustc.main.ElaborateDrops.before.mir
 //     let mut _0: ();
 //     scope 1 {
 //         let _1: std::boxed::Box<S>;
@@ -46,7 +48,7 @@ impl Drop for S {
 //     }
 //
 //     bb1: {
-//         _1 = _2;
+//         _1 = move _2;
 //         drop(_2) -> bb4;
 //     }
 //
@@ -61,8 +63,8 @@ impl Drop for S {
 //     bb4: {
 //         StorageDead(_2);
 //         StorageLive(_4);
-//         _4 = _1;
-//         _3 = const std::mem::drop(_4) -> [return: bb5, unwind: bb7];
+//         _4 = move _1;
+//         _3 = const std::mem::drop(move _4) -> [return: bb5, unwind: bb7];
 //     }
 //
 //     bb5: {
@@ -88,4 +90,4 @@ impl Drop for S {
 //         return;
 //     }
 // }
-// END rustc.node4.ElaborateDrops.before.mir
+// END rustc.main.ElaborateDrops.before.mir

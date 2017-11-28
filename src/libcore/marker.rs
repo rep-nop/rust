@@ -39,13 +39,15 @@ use hash::Hasher;
 /// [arc]: ../../std/sync/struct.Arc.html
 /// [ub]: ../../reference/behavior-considered-undefined.html
 #[stable(feature = "rust1", since = "1.0.0")]
-#[lang = "send"]
+#[cfg_attr(stage0, lang = "send")]
 #[rustc_on_unimplemented = "`{Self}` cannot be sent between threads safely"]
 pub unsafe trait Send {
     // empty.
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(unknown_lints)]
+#[allow(auto_impl)]
 unsafe impl Send for .. { }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -312,7 +314,7 @@ pub trait Copy : Clone {
 ///
 /// For cases when one does need thread-safe interior mutability,
 /// Rust provides [atomic data types], as well as explicit locking via
-/// [`sync::Mutex`][mutex] and [`sync::RWLock`][rwlock]. These types
+/// [`sync::Mutex`][mutex] and [`sync::RwLock`][rwlock]. These types
 /// ensure that any mutation cannot cause data races, hence the types
 /// are `Sync`. Likewise, [`sync::Arc`][arc] provides a thread-safe
 /// analogue of [`Rc`][rc].
@@ -349,6 +351,8 @@ pub unsafe trait Sync {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(unknown_lints)]
+#[allow(auto_impl)]
 unsafe impl Sync for .. { }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -562,6 +566,8 @@ mod impls {
 #[lang = "freeze"]
 unsafe trait Freeze {}
 
+#[allow(unknown_lints)]
+#[allow(auto_impl)]
 unsafe impl Freeze for .. {}
 
 impl<T: ?Sized> !Freeze for UnsafeCell<T> {}

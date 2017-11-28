@@ -33,8 +33,28 @@ impl_stable_hash_for!(struct mir::LocalDecl<'tcx> {
 });
 impl_stable_hash_for!(struct mir::UpvarDecl { debug_name, by_ref });
 impl_stable_hash_for!(struct mir::BasicBlockData<'tcx> { statements, terminator, is_cleanup });
-impl_stable_hash_for!(struct mir::UnsafetyViolation { source_info, description, lint_node_id });
+impl_stable_hash_for!(struct mir::UnsafetyViolation { source_info, description, kind });
+impl_stable_hash_for!(struct mir::UnsafetyCheckResult { violations, unsafe_blocks });
 
+impl<'gcx> HashStable<StableHashingContext<'gcx>>
+for mir::UnsafetyViolationKind {
+    #[inline]
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut StableHashingContext<'gcx>,
+                                          hasher: &mut StableHasher<W>) {
+
+        mem::discriminant(self).hash_stable(hcx, hasher);
+
+        match *self {
+            mir::UnsafetyViolationKind::General => {}
+            mir::UnsafetyViolationKind::ExternStatic(lint_node_id) |
+            mir::UnsafetyViolationKind::BorrowPacked(lint_node_id) => {
+                lint_node_id.hash_stable(hcx, hasher);
+            }
+
+        }
+    }
+}
 impl<'gcx> HashStable<StableHashingContext<'gcx>>
 for mir::Terminator<'gcx> {
     #[inline]
@@ -62,7 +82,8 @@ for mir::Terminator<'gcx> {
             mir::TerminatorKind::Drop { .. } |
             mir::TerminatorKind::DropAndReplace { .. } |
             mir::TerminatorKind::Yield { .. } |
-            mir::TerminatorKind::Call { .. } => false,
+            mir::TerminatorKind::Call { .. } |
+            mir::TerminatorKind::FalseEdges { .. } => false,
         };
 
         if hash_spans_unconditionally {
@@ -209,6 +230,12 @@ for mir::TerminatorKind<'gcx> {
                 msg.hash_stable(hcx, hasher);
                 target.hash_stable(hcx, hasher);
                 cleanup.hash_stable(hcx, hasher);
+            }
+            mir::TerminatorKind::FalseEdges { ref real_target, ref imaginary_targets } => {
+                real_target.hash_stable(hcx, hasher);
+                for target in imaginary_targets {
+                    target.hash_stable(hcx, hasher);
+                }
             }
         }
     }
@@ -393,7 +420,10 @@ impl<'gcx> HashStable<StableHashingContext<'gcx>> for mir::Operand<'gcx> {
         mem::discriminant(self).hash_stable(hcx, hasher);
 
         match *self {
-            mir::Operand::Consume(ref lvalue) => {
+            mir::Operand::Copy(ref lvalue) => {
+                lvalue.hash_stable(hcx, hasher);
+            }
+            mir::Operand::Move(ref lvalue) => {
                 lvalue.hash_stable(hcx, hasher);
             }
             mir::Operand::Constant(ref constant) => {

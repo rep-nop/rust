@@ -100,7 +100,7 @@ impl<'tcx> fmt::Display for Instance<'tcx> {
 impl<'a, 'b, 'tcx> Instance<'tcx> {
     pub fn new(def_id: DefId, substs: &'tcx Substs<'tcx>)
                -> Instance<'tcx> {
-        assert!(substs.is_normalized_for_trans() && !substs.has_escaping_regions(),
+        assert!(!substs.has_escaping_regions(),
                 "substs of instance {:?} not normalized for trans: {:?}",
                 def_id, substs);
         Instance { def: InstanceDef::Item(def_id), substs: substs }
@@ -139,12 +139,12 @@ impl<'a, 'b, 'tcx> Instance<'tcx> {
                    substs: &'tcx Substs<'tcx>) -> Option<Instance<'tcx>> {
         debug!("resolve(def_id={:?}, substs={:?})", def_id, substs);
         let result = if let Some(trait_def_id) = tcx.trait_of_item(def_id) {
-            debug!(" => associated item, attempting to find impl");
+            debug!(" => associated item, attempting to find impl in param_env {:#?}", param_env);
             let item = tcx.associated_item(def_id);
             resolve_associated_item(tcx, &item, param_env, trait_def_id, substs)
         } else {
             let ty = tcx.type_of(def_id);
-            let item_type = tcx.trans_apply_param_substs(substs, &ty);
+            let item_type = tcx.trans_apply_param_substs_env(substs, param_env, &ty);
 
             let def = match item_type.sty {
                 ty::TyFnDef(..) if {
@@ -189,7 +189,7 @@ fn resolve_closure<'a, 'tcx>(
                    requested_kind: ty::ClosureKind)
 -> Instance<'tcx>
 {
-    let actual_kind = tcx.closure_kind(def_id);
+    let actual_kind = substs.closure_kind(def_id, tcx);
 
     match needs_fn_once_adapter_shim(actual_kind, requested_kind) {
         Ok(true) => fn_once_adapter_instance(tcx, def_id, substs),
@@ -256,7 +256,7 @@ fn resolve_associated_item<'a, 'tcx>(
                 None
             }
         }
-        traits::VtableDefaultImpl(..) | traits::VtableParam(..) => None
+        traits::VtableAutoImpl(..) | traits::VtableParam(..) => None
     }
 }
 

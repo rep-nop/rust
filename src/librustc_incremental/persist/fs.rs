@@ -115,7 +115,7 @@
 //! implemented.
 
 use rustc::hir::svh::Svh;
-use rustc::session::Session;
+use rustc::session::{Session, CrateDisambiguator};
 use rustc::util::fs as fs_util;
 use rustc_data_structures::{flock, base_n};
 use rustc_data_structures::fx::{FxHashSet, FxHashMap};
@@ -125,12 +125,14 @@ use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::{UNIX_EPOCH, SystemTime, Duration};
-use std::__rand::{thread_rng, Rng};
+
+use rand::{thread_rng, Rng};
 
 const LOCK_FILE_EXT: &'static str = ".lock";
 const DEP_GRAPH_FILENAME: &'static str = "dep-graph.bin";
 const WORK_PRODUCTS_FILENAME: &'static str = "work-products.bin";
 const METADATA_HASHES_FILENAME: &'static str = "metadata.bin";
+const QUERY_CACHE_FILENAME: &'static str = "query-cache.bin";
 
 // We encode integers using the following base, so they are shorter than decimal
 // or hexadecimal numbers (we want short file and directory names). Since these
@@ -148,6 +150,10 @@ pub fn work_products_path(sess: &Session) -> PathBuf {
 
 pub fn metadata_hash_export_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, METADATA_HASHES_FILENAME)
+}
+
+pub fn query_cache_path(sess: &Session) -> PathBuf {
+    in_incr_comp_dir_sess(sess, QUERY_CACHE_FILENAME)
 }
 
 pub fn lock_file_path(session_dir: &Path) -> PathBuf {
@@ -188,7 +194,7 @@ pub fn in_incr_comp_dir(incr_comp_session_dir: &Path, file_name: &str) -> PathBu
 /// The garbage collection will take care of it.
 pub fn prepare_session_directory(sess: &Session,
                                  crate_name: &str,
-                                 crate_disambiguator: &str) {
+                                 crate_disambiguator: CrateDisambiguator) {
     if sess.opts.incremental.is_none() {
         return
     }
@@ -614,21 +620,17 @@ fn string_to_timestamp(s: &str) -> Result<SystemTime, ()> {
 
 fn crate_path(sess: &Session,
               crate_name: &str,
-              crate_disambiguator: &str)
+              crate_disambiguator: CrateDisambiguator)
               -> PathBuf {
-    use std::hash::{Hasher, Hash};
-    use std::collections::hash_map::DefaultHasher;
 
     let incr_dir = sess.opts.incremental.as_ref().unwrap().clone();
 
-    // The full crate disambiguator is really long. A hash of it should be
+    // The full crate disambiguator is really long. 64 bits of it should be
     // sufficient.
-    let mut hasher = DefaultHasher::new();
-    crate_disambiguator.hash(&mut hasher);
+    let crate_disambiguator = crate_disambiguator.to_fingerprint().to_smaller_hash();
+    let crate_disambiguator = base_n::encode(crate_disambiguator, INT_ENCODE_BASE);
 
-    let crate_name = format!("{}-{}",
-                             crate_name,
-                             base_n::encode(hasher.finish(), INT_ENCODE_BASE));
+    let crate_name = format!("{}-{}", crate_name, crate_disambiguator);
     incr_dir.join(crate_name)
 }
 

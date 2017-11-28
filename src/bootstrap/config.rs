@@ -76,12 +76,12 @@ pub struct Config {
     pub llvm_static_stdcpp: bool,
     pub llvm_link_shared: bool,
     pub llvm_targets: Option<String>,
-    pub llvm_experimental_targets: Option<String>,
+    pub llvm_experimental_targets: String,
     pub llvm_link_jobs: Option<u32>,
 
     // rust codegen options
     pub rust_optimize: bool,
-    pub rust_codegen_units: u32,
+    pub rust_codegen_units: Option<u32>,
     pub rust_debug_assertions: bool,
     pub rust_debuginfo: bool,
     pub rust_debuginfo_lines: bool,
@@ -207,6 +207,11 @@ struct Install {
     bindir: Option<String>,
     libdir: Option<String>,
     mandir: Option<String>,
+
+    // standard paths, currently unused
+    datadir: Option<String>,
+    infodir: Option<String>,
+    localstatedir: Option<String>,
 }
 
 /// TOML representation of how the LLVM build is configured.
@@ -299,6 +304,7 @@ impl Config {
         let mut config = Config::default();
         config.llvm_enabled = true;
         config.llvm_optimize = true;
+        config.llvm_version_check = true;
         config.use_jemalloc = true;
         config.backtrace = true;
         config.rust_optimize = true;
@@ -306,7 +312,6 @@ impl Config {
         config.submodules = true;
         config.docs = true;
         config.rust_rpath = true;
-        config.rust_codegen_units = 1;
         config.channel = "dev".to_string();
         config.codegen_tests = true;
         config.ignore_git = false;
@@ -442,7 +447,8 @@ impl Config {
             set(&mut config.llvm_static_stdcpp, llvm.static_libstdcpp);
             set(&mut config.llvm_link_shared, llvm.link_shared);
             config.llvm_targets = llvm.targets.clone();
-            config.llvm_experimental_targets = llvm.experimental_targets.clone();
+            config.llvm_experimental_targets = llvm.experimental_targets.clone()
+                .unwrap_or("WebAssembly".to_string());
             config.llvm_link_jobs = llvm.link_jobs;
         }
 
@@ -469,8 +475,8 @@ impl Config {
             config.musl_root = rust.musl_root.clone().map(PathBuf::from);
 
             match rust.codegen_units {
-                Some(0) => config.rust_codegen_units = num_cpus::get() as u32,
-                Some(n) => config.rust_codegen_units = n,
+                Some(0) => config.rust_codegen_units = Some(num_cpus::get() as u32),
+                Some(n) => config.rust_codegen_units = Some(n),
                 None => {}
             }
         }
@@ -523,7 +529,7 @@ impl Config {
         // Now that we've reached the end of our configuration, infer the
         // default values for all options that we haven't otherwise stored yet.
 
-        let default = config.channel == "nightly";
+        let default = false;
         config.llvm_assertions = llvm_assertions.unwrap_or(default);
 
         let default = match &config.channel[..] {

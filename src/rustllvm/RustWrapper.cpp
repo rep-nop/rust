@@ -54,7 +54,7 @@ static AtomicOrdering fromRust(LLVMAtomicOrdering Ordering) {
     return AtomicOrdering::SequentiallyConsistent;
   }
 
-  llvm_unreachable("Invalid LLVMAtomicOrdering value!");
+  report_fatal_error("Invalid LLVMAtomicOrdering value!");
 }
 
 static LLVM_THREAD_LOCAL char *LastError;
@@ -161,7 +161,7 @@ static Attribute::AttrKind fromRust(LLVMRustAttribute Kind) {
   case SanitizeMemory:
     return Attribute::SanitizeMemory;
   }
-  llvm_unreachable("bad AttributeKind");
+  report_fatal_error("bad AttributeKind");
 }
 
 extern "C" void LLVMRustAddCallSiteAttribute(LLVMValueRef Instr, unsigned Index,
@@ -172,6 +172,22 @@ extern "C" void LLVMRustAddCallSiteAttribute(LLVMValueRef Instr, unsigned Index,
   Call.addAttribute(Index, Attr);
 #else
   AttrBuilder B(Attr);
+  Call.setAttributes(Call.getAttributes().addAttributes(
+      Call->getContext(), Index,
+      AttributeSet::get(Call->getContext(), Index, B)));
+#endif
+}
+
+extern "C" void LLVMRustAddAlignmentCallSiteAttr(LLVMValueRef Instr,
+                                                 unsigned Index,
+                                                 uint32_t Bytes) {
+  CallSite Call = CallSite(unwrap<Instruction>(Instr));
+  AttrBuilder B;
+  B.addAlignmentAttr(Bytes);
+#if LLVM_VERSION_GE(5, 0)
+  Call.setAttributes(Call.getAttributes().addAttributes(
+      Call->getContext(), Index, B));
+#else
   Call.setAttributes(Call.getAttributes().addAttributes(
       Call->getContext(), Index,
       AttributeSet::get(Call->getContext(), Index, B)));
@@ -194,6 +210,22 @@ extern "C" void LLVMRustAddDereferenceableCallSiteAttr(LLVMValueRef Instr,
 #endif
 }
 
+extern "C" void LLVMRustAddDereferenceableOrNullCallSiteAttr(LLVMValueRef Instr,
+                                                             unsigned Index,
+                                                             uint64_t Bytes) {
+  CallSite Call = CallSite(unwrap<Instruction>(Instr));
+  AttrBuilder B;
+  B.addDereferenceableOrNullAttr(Bytes);
+#if LLVM_VERSION_GE(5, 0)
+  Call.setAttributes(Call.getAttributes().addAttributes(
+      Call->getContext(), Index, B));
+#else
+  Call.setAttributes(Call.getAttributes().addAttributes(
+      Call->getContext(), Index,
+      AttributeSet::get(Call->getContext(), Index, B)));
+#endif
+}
+
 extern "C" void LLVMRustAddFunctionAttribute(LLVMValueRef Fn, unsigned Index,
                                              LLVMRustAttribute RustAttr) {
   Function *A = unwrap<Function>(Fn);
@@ -206,11 +238,37 @@ extern "C" void LLVMRustAddFunctionAttribute(LLVMValueRef Fn, unsigned Index,
 #endif
 }
 
+extern "C" void LLVMRustAddAlignmentAttr(LLVMValueRef Fn,
+                                         unsigned Index,
+                                         uint32_t Bytes) {
+  Function *A = unwrap<Function>(Fn);
+  AttrBuilder B;
+  B.addAlignmentAttr(Bytes);
+#if LLVM_VERSION_GE(5, 0)
+  A->addAttributes(Index, B);
+#else
+  A->addAttributes(Index, AttributeSet::get(A->getContext(), Index, B));
+#endif
+}
+
 extern "C" void LLVMRustAddDereferenceableAttr(LLVMValueRef Fn, unsigned Index,
                                                uint64_t Bytes) {
   Function *A = unwrap<Function>(Fn);
   AttrBuilder B;
   B.addDereferenceableAttr(Bytes);
+#if LLVM_VERSION_GE(5, 0)
+  A->addAttributes(Index, B);
+#else
+  A->addAttributes(Index, AttributeSet::get(A->getContext(), Index, B));
+#endif
+}
+
+extern "C" void LLVMRustAddDereferenceableOrNullAttr(LLVMValueRef Fn,
+                                                     unsigned Index,
+                                                     uint64_t Bytes) {
+  Function *A = unwrap<Function>(Fn);
+  AttrBuilder B;
+  B.addDereferenceableOrNullAttr(Bytes);
 #if LLVM_VERSION_GE(5, 0)
   A->addAttributes(Index, B);
 #else
@@ -257,21 +315,18 @@ extern "C" void LLVMRustSetHasUnsafeAlgebra(LLVMValueRef V) {
 
 extern "C" LLVMValueRef
 LLVMRustBuildAtomicLoad(LLVMBuilderRef B, LLVMValueRef Source, const char *Name,
-                        LLVMAtomicOrdering Order, unsigned Alignment) {
+                        LLVMAtomicOrdering Order) {
   LoadInst *LI = new LoadInst(unwrap(Source), 0);
   LI->setAtomic(fromRust(Order));
-  LI->setAlignment(Alignment);
   return wrap(unwrap(B)->Insert(LI, Name));
 }
 
 extern "C" LLVMValueRef LLVMRustBuildAtomicStore(LLVMBuilderRef B,
                                                  LLVMValueRef V,
                                                  LLVMValueRef Target,
-                                                 LLVMAtomicOrdering Order,
-                                                 unsigned Alignment) {
+                                                 LLVMAtomicOrdering Order) {
   StoreInst *SI = new StoreInst(unwrap(V), unwrap(Target));
   SI->setAtomic(fromRust(Order));
-  SI->setAlignment(Alignment);
   return wrap(unwrap(B)->Insert(SI));
 }
 
@@ -301,7 +356,7 @@ static SyncScope::ID fromRust(LLVMRustSynchronizationScope Scope) {
   case LLVMRustSynchronizationScope::CrossThread:
     return SyncScope::System;
   default:
-    llvm_unreachable("bad SynchronizationScope.");
+    report_fatal_error("bad SynchronizationScope.");
   }
 }
 #else
@@ -312,7 +367,7 @@ static SynchronizationScope fromRust(LLVMRustSynchronizationScope Scope) {
   case LLVMRustSynchronizationScope::CrossThread:
     return CrossThread;
   default:
-    llvm_unreachable("bad SynchronizationScope.");
+    report_fatal_error("bad SynchronizationScope.");
   }
 }
 #endif
@@ -342,7 +397,7 @@ static InlineAsm::AsmDialect fromRust(LLVMRustAsmDialect Dialect) {
   case LLVMRustAsmDialect::Intel:
     return InlineAsm::AD_Intel;
   default:
-    llvm_unreachable("bad AsmDialect.");
+    report_fatal_error("bad AsmDialect.");
   }
 }
 
@@ -693,7 +748,7 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateVariable(
         unwrapDI<DIType>(Ty), AlwaysPreserve, fromRust(Flags)
 #if LLVM_VERSION_GE(4, 0)
         ,
-	AlignInBits
+  AlignInBits
 #endif
         ));
   } else {
@@ -1094,7 +1149,7 @@ extern "C" LLVMTypeKind LLVMRustGetTypeKind(LLVMTypeRef Ty) {
     return LLVMTokenTypeKind;
 #endif
   }
-  llvm_unreachable("Unhandled TypeID.");
+  report_fatal_error("Unhandled TypeID.");
 }
 
 extern "C" void LLVMRustWriteDebugLocToString(LLVMContextRef C,
@@ -1315,7 +1370,7 @@ static LLVMRustLinkage toRust(LLVMLinkage Linkage) {
   case LLVMCommonLinkage:
     return LLVMRustLinkage::CommonLinkage;
   default:
-    llvm_unreachable("Invalid LLVMRustLinkage value!");
+    report_fatal_error("Invalid LLVMRustLinkage value!");
   }
 }
 
@@ -1344,7 +1399,7 @@ static LLVMLinkage fromRust(LLVMRustLinkage Linkage) {
   case LLVMRustLinkage::CommonLinkage:
     return LLVMCommonLinkage;
   }
-  llvm_unreachable("Invalid LLVMRustLinkage value!");
+  report_fatal_error("Invalid LLVMRustLinkage value!");
 }
 
 extern "C" LLVMRustLinkage LLVMRustGetLinkage(LLVMValueRef V) {
@@ -1392,7 +1447,7 @@ static LLVMRustVisibility toRust(LLVMVisibility Vis) {
   case LLVMProtectedVisibility:
     return LLVMRustVisibility::Protected;
   }
-  llvm_unreachable("Invalid LLVMRustVisibility value!");
+  report_fatal_error("Invalid LLVMRustVisibility value!");
 }
 
 static LLVMVisibility fromRust(LLVMRustVisibility Vis) {
@@ -1404,7 +1459,7 @@ static LLVMVisibility fromRust(LLVMRustVisibility Vis) {
   case LLVMRustVisibility::Protected:
     return LLVMProtectedVisibility;
   }
-  llvm_unreachable("Invalid LLVMRustVisibility value!");
+  report_fatal_error("Invalid LLVMRustVisibility value!");
 }
 
 extern "C" LLVMRustVisibility LLVMRustGetVisibility(LLVMValueRef V) {

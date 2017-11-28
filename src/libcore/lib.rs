@@ -85,12 +85,29 @@
 #![feature(prelude_import)]
 #![feature(repr_simd, platform_intrinsics)]
 #![feature(rustc_attrs)]
-#![cfg_attr(not(stage0), feature(rustc_const_unstable))]
+#![feature(rustc_const_unstable)]
 #![feature(specialization)]
 #![feature(staged_api)]
 #![feature(unboxed_closures)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
+#![feature(const_min_value)]
+#![feature(const_max_value)]
+#![feature(const_atomic_bool_new)]
+#![feature(const_atomic_isize_new)]
+#![feature(const_atomic_usize_new)]
+#![feature(const_atomic_i8_new)]
+#![feature(const_atomic_u8_new)]
+#![feature(const_atomic_i16_new)]
+#![feature(const_atomic_u16_new)]
+#![feature(const_atomic_i32_new)]
+#![feature(const_atomic_u32_new)]
+#![feature(const_atomic_i64_new)]
+#![feature(const_atomic_u64_new)]
+#![feature(const_unsafe_cell_new)]
+#![feature(const_cell_new)]
+#![feature(const_nonzero_new)]
+#![cfg_attr(not(stage0), feature(doc_spotlight))]
 
 #![cfg_attr(not(stage0), feature(const_min_value))]
 #![cfg_attr(not(stage0), feature(const_max_value))]
@@ -190,3 +207,4 @@ pub mod fmt;
 mod char_private;
 mod iter_private;
 mod tuple;
+mod unit;

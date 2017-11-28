@@ -11,10 +11,11 @@
 #![crate_name = "compiletest"]
 
 #![feature(test)]
+#![feature(slice_rotate)]
 
 #![deny(warnings)]
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(unix)]
 extern crate libc;
 extern crate test;
 extern crate getopts;
@@ -47,6 +48,7 @@ pub mod runtest;
 pub mod common;
 pub mod errors;
 mod raise_fd_limit;
+mod read2;
 
 fn main() {
     env_logger::init().unwrap();
@@ -491,6 +493,7 @@ fn stamp(config: &Config, testpaths: &TestPaths) -> PathBuf {
                              config.stage_id);
     config.build_base.canonicalize()
           .unwrap_or_else(|_| config.build_base.clone())
+          .join(&testpaths.relative_dir)
           .join(stamp_name)
 }
 
@@ -521,6 +524,10 @@ fn up_to_date(config: &Config, testpaths: &TestPaths, props: &EarlyProps) -> boo
     for lib in config.run_lib_path.read_dir().unwrap() {
         let lib = lib.unwrap();
         inputs.push(mtime(&lib.path()));
+    }
+    if let Some(ref rustdoc_path) = config.rustdoc_path {
+        inputs.push(mtime(&rustdoc_path));
+        inputs.push(mtime(&rust_src_dir.join("src/etc/htmldocck.py")));
     }
     inputs.iter().any(|input| *input > stamp)
 }

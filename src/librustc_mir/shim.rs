@@ -13,7 +13,6 @@ use rustc::hir::def_id::DefId;
 use rustc::infer;
 use rustc::middle::const_val::ConstVal;
 use rustc::mir::*;
-use rustc::mir::transform::MirSource;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::subst::{Kind, Subst, Substs};
 use rustc::ty::maps::Providers;
@@ -28,7 +27,8 @@ use syntax_pos::Span;
 use std::fmt;
 use std::iter;
 
-use transform::{add_call_guards, no_landing_pads, simplify};
+use transform::{add_moves_for_packed_drops, add_call_guards};
+use transform::{no_landing_pads, simplify};
 use util::elaborate_drops::{self, DropElaborator, DropStyle, DropFlagMode};
 use util::patch::MirPatch;
 
@@ -115,6 +115,8 @@ fn make_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
     };
     debug!("make_shim({:?}) = untransformed {:?}", instance, result);
+    add_moves_for_packed_drops::add_moves_for_packed_drops(
+        tcx, &mut result, instance.def_id());
     no_landing_pads::no_landing_pads(tcx, &mut result);
     simplify::simplify_cfg(&mut result);
     add_call_guards::CriticalCallEdges.add_call_guards(&mut result);
@@ -198,7 +200,6 @@ fn build_drop_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         ),
         ClearOnDecode::Clear,
         IndexVec::new(),
-        sig.output(),
         None,
         local_decls_for_sig(&sig, span),
         sig.inputs().len(),
@@ -346,7 +347,6 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
             ),
             ClearOnDecode::Clear,
             IndexVec::new(),
-            self.sig.output(),
             None,
             self.local_decls,
             self.sig.inputs().len(),
@@ -385,7 +385,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let ret_statement = self.make_statement(
             StatementKind::Assign(
                 Lvalue::Local(RETURN_POINTER),
-                Rvalue::Use(Operand::Consume(rcvr))
+                Rvalue::Use(Operand::Copy(rcvr))
             )
         );
         self.block(vec![ret_statement], TerminatorKind::Return, false);
@@ -448,7 +448,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         // `let loc = Clone::clone(ref_loc);`
         self.block(vec![statement], TerminatorKind::Call {
             func,
-            args: vec![Operand::Consume(ref_loc)],
+            args: vec![Operand::Move(ref_loc)],
             destination: Some((loc.clone(), next)),
             cleanup: Some(cleanup),
         }, false);
@@ -470,14 +470,14 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let compute_cond = self.make_statement(
             StatementKind::Assign(
                 cond.clone(),
-                Rvalue::BinaryOp(BinOp::Ne, Operand::Consume(end), Operand::Consume(beg))
+                Rvalue::BinaryOp(BinOp::Ne, Operand::Copy(end), Operand::Copy(beg))
             )
         );
 
         // `if end != beg { goto loop_body; } else { goto loop_end; }`
         self.block(
             vec![compute_cond],
-            TerminatorKind::if_(tcx, Operand::Consume(cond), loop_body, loop_end),
+            TerminatorKind::if_(tcx, Operand::Move(cond), loop_body, loop_end),
             is_cleanup
         );
     }
@@ -547,7 +547,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
             self.make_statement(
                 StatementKind::Assign(
                     ret_field,
-                    Rvalue::Use(Operand::Consume(cloned))
+                    Rvalue::Use(Operand::Move(cloned))
                 )
             ),
             self.make_statement(
@@ -555,7 +555,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
                     Lvalue::Local(beg),
                     Rvalue::BinaryOp(
                         BinOp::Add,
-                        Operand::Consume(Lvalue::Local(beg)),
+                        Operand::Copy(Lvalue::Local(beg)),
                         Operand::Constant(self.make_usize(1))
                     )
                 )
@@ -568,7 +568,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let ret_statement = self.make_statement(
             StatementKind::Assign(
                 Lvalue::Local(RETURN_POINTER),
-                Rvalue::Use(Operand::Consume(ret.clone())),
+                Rvalue::Use(Operand::Move(ret.clone())),
             )
         );
         self.block(vec![ret_statement], TerminatorKind::Return, false);
@@ -611,7 +611,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
                 Lvalue::Local(beg),
                 Rvalue::BinaryOp(
                     BinOp::Add,
-                    Operand::Consume(Lvalue::Local(beg)),
+                    Operand::Copy(Lvalue::Local(beg)),
                     Operand::Constant(self.make_usize(1))
                 )
             )
@@ -666,7 +666,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
                 Lvalue::Local(RETURN_POINTER),
                 Rvalue::Aggregate(
                     box kind,
-                    returns.into_iter().map(Operand::Consume).collect()
+                    returns.into_iter().map(Operand::Move).collect()
                 )
             )
         );
@@ -705,8 +705,8 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let mut statements = vec![];
 
     let rcvr = match rcvr_adjustment {
-        Adjustment::Identity => Operand::Consume(rcvr_l),
-        Adjustment::Deref => Operand::Consume(rcvr_l.deref()),
+        Adjustment::Identity => Operand::Move(rcvr_l),
+        Adjustment::Deref => Operand::Copy(rcvr_l.deref()),
         Adjustment::RefMut => {
             // let rcvr = &mut rcvr;
             let ref_rcvr = local_decls.push(temp_decl(
@@ -724,7 +724,7 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     Rvalue::Ref(tcx.types.re_erased, BorrowKind::Mut, rcvr_l)
                 )
             });
-            Operand::Consume(Lvalue::Local(ref_rcvr))
+            Operand::Move(Lvalue::Local(ref_rcvr))
         }
     };
 
@@ -750,11 +750,11 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     if let Some(untuple_args) = untuple_args {
         args.extend(untuple_args.iter().enumerate().map(|(i, ity)| {
             let arg_lv = Lvalue::Local(Local::new(1+1));
-            Operand::Consume(arg_lv.field(Field::new(i), *ity))
+            Operand::Move(arg_lv.field(Field::new(i), *ity))
         }));
     } else {
         args.extend((1..sig.inputs().len()).map(|i| {
-            Operand::Consume(Lvalue::Local(Local::new(1+i)))
+            Operand::Move(Lvalue::Local(Local::new(1+i)))
         }));
     }
 
@@ -809,7 +809,6 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         ),
         ClearOnDecode::Clear,
         IndexVec::new(),
-        sig.output(),
         None,
         local_decls,
         sig.inputs().len(),
@@ -826,13 +825,19 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
                                       ctor_id: ast::NodeId,
                                       fields: &[hir::StructField],
                                       span: Span)
-                                      -> (Mir<'tcx>, MirSource)
+                                      -> Mir<'tcx>
 {
     let tcx = infcx.tcx;
+    let gcx = tcx.global_tcx();
     let def_id = tcx.hir.local_def_id(ctor_id);
-    let sig = tcx.no_late_bound_regions(&tcx.fn_sig(def_id))
+    let sig = gcx.no_late_bound_regions(&gcx.fn_sig(def_id))
         .expect("LBR in ADT constructor signature");
-    let sig = tcx.erase_regions(&sig);
+    let sig = gcx.erase_regions(&sig);
+    let param_env = gcx.param_env(def_id);
+
+    // Normalize the sig now that we have liberated the late-bound
+    // regions.
+    let sig = gcx.normalize_associated_type_in_env(&sig, param_env);
 
     let (adt_def, substs) = match sig.output().sty {
         ty::TyAdt(adt_def, substs) => (adt_def, substs),
@@ -863,7 +868,7 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
                 Rvalue::Aggregate(
                     box AggregateKind::Adt(adt_def, variant_no, substs, None),
                     (1..sig.inputs().len()+1).map(|i| {
-                        Operand::Consume(Lvalue::Local(Local::new(i)))
+                        Operand::Move(Lvalue::Local(Local::new(i)))
                     }).collect()
                 )
             )
@@ -875,19 +880,17 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
         is_cleanup: false
     };
 
-    let mir = Mir::new(
+    Mir::new(
         IndexVec::from_elem_n(start_block, 1),
         IndexVec::from_elem_n(
             VisibilityScopeData { span: span, parent_scope: None }, 1
         ),
         ClearOnDecode::Clear,
         IndexVec::new(),
-        sig.output(),
         None,
         local_decls,
         sig.inputs().len(),
         vec![],
         span
-    );
-    (mir, MirSource::Fn(ctor_id))
+    )
 }

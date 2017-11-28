@@ -13,6 +13,8 @@ use fmt;
 use ops;
 use cmp;
 use hash::{Hash, Hasher};
+use rc::Rc;
+use sync::Arc;
 
 use sys::os_str::{Buf, Slice};
 use sys_common::{AsInner, IntoInner, FromInner};
@@ -41,7 +43,7 @@ use sys_common::{AsInner, IntoInner, FromInner};
 /// # Creating an `OsString`
 ///
 /// **From a Rust string**: `OsString` implements
-/// [`From`]`<`[`String`]`>`, so you can use `my_string.`[`from`] to
+/// [`From`]`<`[`String`]`>`, so you can use `my_string.from` to
 /// create an `OsString` from a normal Rust string.
 ///
 /// **From slices:** Just like you can start with an empty Rust
@@ -63,7 +65,6 @@ use sys_common::{AsInner, IntoInner, FromInner};
 ///
 /// [`OsStr`]: struct.OsStr.html
 /// [`From`]: ../convert/trait.From.html
-/// [`from`]: ../convert/trait.From.html#tymethod.from
 /// [`String`]: ../string/struct.String.html
 /// [`&str`]: ../primitive.str.html
 /// [`u8`]: ../primitive.u8.html
@@ -593,6 +594,42 @@ impl From<OsString> for Box<OsStr> {
     }
 }
 
+#[stable(feature = "shared_from_slice2", since = "1.23.0")]
+impl From<OsString> for Arc<OsStr> {
+    #[inline]
+    fn from(s: OsString) -> Arc<OsStr> {
+        let arc = s.inner.into_arc();
+        unsafe { Arc::from_raw(Arc::into_raw(arc) as *const OsStr) }
+    }
+}
+
+#[stable(feature = "shared_from_slice2", since = "1.23.0")]
+impl<'a> From<&'a OsStr> for Arc<OsStr> {
+    #[inline]
+    fn from(s: &OsStr) -> Arc<OsStr> {
+        let arc = s.inner.into_arc();
+        unsafe { Arc::from_raw(Arc::into_raw(arc) as *const OsStr) }
+    }
+}
+
+#[stable(feature = "shared_from_slice2", since = "1.23.0")]
+impl From<OsString> for Rc<OsStr> {
+    #[inline]
+    fn from(s: OsString) -> Rc<OsStr> {
+        let rc = s.inner.into_rc();
+        unsafe { Rc::from_raw(Rc::into_raw(rc) as *const OsStr) }
+    }
+}
+
+#[stable(feature = "shared_from_slice2", since = "1.23.0")]
+impl<'a> From<&'a OsStr> for Rc<OsStr> {
+    #[inline]
+    fn from(s: &OsStr) -> Rc<OsStr> {
+        let rc = s.inner.into_rc();
+        unsafe { Rc::from_raw(Rc::into_raw(rc) as *const OsStr) }
+    }
+}
+
 #[stable(feature = "box_default_extra", since = "1.17.0")]
 impl Default for Box<OsStr> {
     fn default() -> Box<OsStr> {
@@ -794,6 +831,9 @@ mod tests {
     use super::*;
     use sys_common::{AsInner, IntoInner};
 
+    use rc::Rc;
+    use sync::Arc;
+
     #[test]
     fn test_os_string_with_capacity() {
         let os_string = OsString::with_capacity(0);
@@ -935,5 +975,22 @@ mod tests {
         os_str.clone_into(&mut os_string);
         assert_eq!(os_str, os_string);
         assert!(os_string.capacity() >= 123);
+    }
+
+    #[test]
+    fn into_rc() {
+        let orig = "Hello, world!";
+        let os_str = OsStr::new(orig);
+        let rc: Rc<OsStr> = Rc::from(os_str);
+        let arc: Arc<OsStr> = Arc::from(os_str);
+
+        assert_eq!(&*rc, os_str);
+        assert_eq!(&*arc, os_str);
+
+        let rc2: Rc<OsStr> = Rc::from(os_str.to_owned());
+        let arc2: Arc<OsStr> = Arc::from(os_str.to_owned());
+
+        assert_eq!(&*rc2, os_str);
+        assert_eq!(&*arc2, os_str);
     }
 }

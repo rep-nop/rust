@@ -63,12 +63,11 @@ use rustc::hir;
 use rustc::hir::def_id::DefId;
 use rustc::middle::const_val::ConstVal;
 use rustc::mir::*;
-use rustc::mir::transform::{MirPass, MirSource};
 use rustc::mir::visit::{LvalueContext, Visitor, MutVisitor};
 use rustc::ty::{self, TyCtxt, AdtDef, Ty, GeneratorInterior};
 use rustc::ty::subst::{Kind, Substs};
 use util::dump_mir;
-use util::liveness;
+use util::liveness::{self, LivenessMode};
 use rustc_const_math::ConstInt;
 use rustc_data_structures::indexed_vec::Idx;
 use rustc_data_structures::indexed_set::IdxSetBuf;
@@ -76,6 +75,7 @@ use std::collections::HashMap;
 use std::borrow::Cow;
 use std::iter::once;
 use std::mem;
+use transform::{MirPass, MirSource};
 use transform::simplify;
 use transform::no_landing_pads::no_landing_pads;
 use dataflow::{self, MaybeStorageLive, state_for_location};
@@ -230,7 +230,7 @@ impl<'a, 'tcx> MutVisitor<'tcx> for TransformVisitor<'a, 'tcx> {
         let ret_val = match data.terminator().kind {
             TerminatorKind::Return => Some((1,
                 None,
-                Operand::Consume(Lvalue::Local(self.new_ret_local)),
+                Operand::Move(Lvalue::Local(self.new_ret_local)),
                 None)),
             TerminatorKind::Yield { ref value, resume, drop } => Some((0,
                 Some(resume),
@@ -338,7 +338,7 @@ fn locals_live_across_suspend_points<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                                (liveness::LocalSet,
                                                 HashMap<BasicBlock, liveness::LocalSet>) {
     let dead_unwinds = IdxSetBuf::new_empty(mir.basic_blocks().len());
-    let node_id = source.item_id();
+    let node_id = tcx.hir.as_local_node_id(source.def_id).unwrap();
     let analysis = MaybeStorageLive::new(mir);
     let storage_live =
         dataflow::do_dataflow(tcx, mir, node_id, &[], &dead_unwinds, analysis,
@@ -348,7 +348,10 @@ fn locals_live_across_suspend_points<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     ignored.visit_mir(mir);
 
     let mut set = liveness::LocalSet::new_empty(mir.local_decls.len());
-    let liveness = liveness::liveness_of_locals(mir);
+    let liveness = liveness::liveness_of_locals(mir, LivenessMode {
+        include_regular_use: true,
+        include_drops: true,
+    });
     liveness::dump_mir(tcx, "generator_liveness", source, mir, &liveness);
 
     let mut storage_liveness_map = HashMap::new();
@@ -449,7 +452,7 @@ fn insert_switch<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let default_block = insert_term_block(mir, default);
 
     let switch = TerminatorKind::SwitchInt {
-        discr: Operand::Consume(transform.make_field(transform.state_field, tcx.types.u32)),
+        discr: Operand::Copy(transform.make_field(transform.state_field, tcx.types.u32)),
         switch_ty: tcx.types.u32,
         values: Cow::from(cases.iter().map(|&(i, _)| ConstInt::U32(i)).collect::<Vec<_>>()),
         targets: cases.iter().map(|&(_, d)| d).chain(once(default_block)).collect(),
@@ -554,7 +557,6 @@ fn create_generator_drop_shim<'a, 'tcx>(
     }
 
     // Replace the return variable
-    mir.return_ty = tcx.mk_nil();
     mir.local_decls[RETURN_POINTER] = LocalDecl {
         mutability: Mutability::Mut,
         ty: tcx.mk_nil(),
@@ -760,12 +762,16 @@ impl MirPass for StateTransform {
 
         assert!(mir.generator_drop.is_none());
 
-        let node_id = source.item_id();
-        let def_id = tcx.hir.local_def_id(source.item_id());
+        let def_id = source.def_id;
+        let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
         let hir_id = tcx.hir.node_to_hir_id(node_id);
 
         // Get the interior types which typeck computed
-        let interior = *tcx.typeck_tables_of(def_id).generator_interiors().get(hir_id).unwrap();
+        let tables = tcx.typeck_tables_of(def_id);
+        let interior = match tables.node_id_to_type(hir_id).sty {
+            ty::TyGenerator(_, _, interior) => interior,
+            ref t => bug!("type of generator not a generator: {:?}", t),
+        };
 
         // The first argument is the generator type passed by value
         let gen_ty = mir.local_decls.raw[1].ty;
@@ -774,7 +780,7 @@ impl MirPass for StateTransform {
         let state_did = tcx.lang_items().gen_state().unwrap();
         let state_adt_ref = tcx.adt_def(state_did);
         let state_substs = tcx.mk_substs([Kind::from(yield_ty),
-            Kind::from(mir.return_ty)].iter());
+            Kind::from(mir.return_ty())].iter());
         let ret_ty = tcx.mk_adt(state_adt_ref, state_substs);
 
         // We rename RETURN_POINTER which has type mir.return_ty to new_ret_local
@@ -805,7 +811,6 @@ impl MirPass for StateTransform {
         transform.visit_mir(mir);
 
         // Update our MIR struct to reflect the changed we've made
-        mir.return_ty = ret_ty;
         mir.yield_ty = None;
         mir.arg_count = 1;
         mir.spread_arg = None;

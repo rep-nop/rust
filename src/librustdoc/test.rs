@@ -31,7 +31,6 @@ use rustc_back::dynamic_lib::DynamicLibrary;
 use rustc_back::tempdir::TempDir;
 use rustc_driver::{self, driver, Compilation};
 use rustc_driver::driver::phase_2_configure_and_expand;
-use rustc_driver::pretty::ReplaceBodyWithLoop;
 use rustc_metadata::cstore::CStore;
 use rustc_resolve::MakeGlobMap;
 use rustc_trans;
@@ -39,7 +38,6 @@ use rustc_trans::back::link;
 use syntax::ast;
 use syntax::codemap::CodeMap;
 use syntax::feature_gate::UnstableFeatures;
-use syntax::fold::Folder;
 use syntax_pos::{BytePos, DUMMY_SP, Pos, Span};
 use errors;
 use errors::emitter::ColorConfig;
@@ -81,7 +79,9 @@ pub fn run(input: &str,
 
     let codemap = Rc::new(CodeMap::new(sessopts.file_path_mapping()));
     let handler =
-        errors::Handler::with_tty_emitter(ColorConfig::Auto, true, false, Some(codemap.clone()));
+        errors::Handler::with_tty_emitter(ColorConfig::Auto,
+                                          true, false,
+                                          Some(codemap.clone()));
 
     let cstore = Rc::new(CStore::new(box rustc_trans::LlvmMetadataLoader));
     let mut sess = session::build_session_(
@@ -95,7 +95,6 @@ pub fn run(input: &str,
     let krate = panictry!(driver::phase_1_parse_input(&driver::CompileController::basic(),
                                                       &sess,
                                                       &input));
-    let krate = ReplaceBodyWithLoop::new().fold_crate(krate);
     let driver::ExpansionResult { defs, mut hir_forest, .. } = {
         phase_2_configure_and_expand(
             &sess,
@@ -238,7 +237,8 @@ fn run_test(test: &str, cratename: &str, filename: &str, cfgs: Vec<String>, libs
     let data = Arc::new(Mutex::new(Vec::new()));
     let codemap = Rc::new(CodeMap::new(sessopts.file_path_mapping()));
     let emitter = errors::emitter::EmitterWriter::new(box Sink(data.clone()),
-                                                      Some(codemap.clone()));
+                                                      Some(codemap.clone()),
+                                                      false);
     let old = io::set_panic(Some(box Sink(data.clone())));
     let _bomb = Bomb(data.clone(), old.unwrap_or(box io::stdout()));
 
@@ -336,14 +336,22 @@ pub fn make_test(s: &str,
 
     let mut prog = String::new();
 
-    // First push any outer attributes from the example, assuming they
-    // are intended to be crate attributes.
-    prog.push_str(&crate_attrs);
+    if opts.attrs.is_empty() {
+        // If there aren't any attributes supplied by #![doc(test(attr(...)))], then allow some
+        // lints that are commonly triggered in doctests. The crate-level test attributes are
+        // commonly used to make tests fail in case they trigger warnings, so having this there in
+        // that case may cause some tests to pass when they shouldn't have.
+        prog.push_str("#![allow(unused)]\n");
+    }
 
-    // Next, any attributes for other aspects such as lints.
+    // Next, any attributes that came from the crate root via #![doc(test(attr(...)))].
     for attr in &opts.attrs {
         prog.push_str(&format!("#![{}]\n", attr));
     }
+
+    // Now push any outer attributes from the example, assuming they
+    // are intended to be crate attributes.
+    prog.push_str(&crate_attrs);
 
     // Don't inject `extern crate std` because it's already injected by the
     // compiler.
@@ -652,14 +660,16 @@ impl<'a, 'hir> HirCollector<'a, 'hir> {
 
         attrs.collapse_doc_comments();
         attrs.unindent_doc_comments();
-        if let Some(doc) = attrs.doc_value() {
+        // the collapse-docs pass won't combine sugared/raw doc attributes, or included files with
+        // anything else, this will combine them for us
+        if let Some(doc) = attrs.collapsed_doc_value() {
             if self.collector.render_type == RenderType::Pulldown {
-                markdown::old_find_testable_code(doc, self.collector,
+                markdown::old_find_testable_code(&doc, self.collector,
                                                  attrs.span.unwrap_or(DUMMY_SP));
-                markdown::find_testable_code(doc, self.collector,
+                markdown::find_testable_code(&doc, self.collector,
                                              attrs.span.unwrap_or(DUMMY_SP));
             } else {
-                markdown::old_find_testable_code(doc, self.collector,
+                markdown::old_find_testable_code(&doc, self.collector,
                                                  attrs.span.unwrap_or(DUMMY_SP));
             }
         }

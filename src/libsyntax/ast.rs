@@ -96,10 +96,15 @@ impl Path {
         }
     }
 
+    // Add starting "crate root" segment to all paths except those that
+    // already have it or start with `self`, `super`, `Self` or `$crate`.
     pub fn default_to_global(mut self) -> Path {
-        if !self.is_global() &&
-           !::parse::token::Ident(self.segments[0].identifier).is_path_segment_keyword() {
-            self.segments.insert(0, PathSegment::crate_root(self.span));
+        if !self.is_global() {
+            let ident = self.segments[0].identifier;
+            if !::parse::token::Ident(ident).is_path_segment_keyword() ||
+               ident.name == keywords::Crate.name() {
+                self.segments.insert(0, PathSegment::crate_root(self.span));
+            }
         }
         self
     }
@@ -921,7 +926,9 @@ pub enum ExprKind {
     /// A function call
     ///
     /// The first field resolves to the function itself,
-    /// and the second field is the list of arguments
+    /// and the second field is the list of arguments.
+    /// This also represents calling the constructor of
+    /// tuple-like ADTs such as tuple structs and enum variants.
     Call(P<Expr>, Vec<P<Expr>>),
     /// A method call (`x.foo::<'static, Bar, Baz>(a, b, c, d)`)
     ///
@@ -1198,7 +1205,6 @@ pub struct MethodSig {
     pub constness: Spanned<Constness>,
     pub abi: Abi,
     pub decl: P<FnDecl>,
-    pub generics: Generics,
 }
 
 /// Represents an item declaration within a trait declaration,
@@ -1210,6 +1216,7 @@ pub struct TraitItem {
     pub id: NodeId,
     pub ident: Ident,
     pub attrs: Vec<Attribute>,
+    pub generics: Generics,
     pub node: TraitItemKind,
     pub span: Span,
     /// See `Item::tokens` for what this is
@@ -1231,6 +1238,7 @@ pub struct ImplItem {
     pub vis: Visibility,
     pub defaultness: Defaultness,
     pub attrs: Vec<Attribute>,
+    pub generics: Generics,
     pub node: ImplItemKind,
     pub span: Span,
     /// See `Item::tokens` for what this is
@@ -1598,6 +1606,13 @@ impl FnDecl {
     }
 }
 
+/// Is the trait definition an auto trait?
+#[derive(Copy, Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub enum IsAuto {
+    Yes,
+    No
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub enum Unsafety {
     Unsafe,
@@ -1807,10 +1822,19 @@ impl PolyTraitRef {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub enum CrateSugar {
+    /// Source is `pub(crate)`
+    PubCrate,
+
+    /// Source is (just) `crate`
+    JustCrate,
+}
+
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub enum Visibility {
     Public,
-    Crate(Span),
+    Crate(Span, CrateSugar),
     Restricted { path: P<Path>, id: NodeId },
     Inherited,
 }
@@ -1950,12 +1974,12 @@ pub enum ItemKind {
     Union(VariantData, Generics),
     /// A Trait declaration (`trait` or `pub trait`).
     ///
-    /// E.g. `trait Foo { .. }` or `trait Foo<T> { .. }`
-    Trait(Unsafety, Generics, TyParamBounds, Vec<TraitItem>),
+    /// E.g. `trait Foo { .. }`, `trait Foo<T> { .. }` or `auto trait Foo {}`
+    Trait(IsAuto, Unsafety, Generics, TyParamBounds, Vec<TraitItem>),
     /// Auto trait implementation.
     ///
     /// E.g. `impl Trait for .. {}` or `impl<T> Trait<T> for .. {}`
-    DefaultImpl(Unsafety, TraitRef),
+    AutoImpl(Unsafety, TraitRef),
     /// An implementation.
     ///
     /// E.g. `impl<A> Foo<A> { .. }` or `impl<A> Trait for Foo<A> { .. }`
@@ -1994,7 +2018,7 @@ impl ItemKind {
             ItemKind::Mac(..) |
             ItemKind::MacroDef(..) |
             ItemKind::Impl(..) |
-            ItemKind::DefaultImpl(..) => "item"
+            ItemKind::AutoImpl(..) => "item"
         }
     }
 }
@@ -2017,13 +2041,16 @@ pub enum ForeignItemKind {
     /// A foreign static item (`static ext: u8`), with optional mutability
     /// (the boolean is true when mutable)
     Static(P<Ty>, bool),
+    /// A foreign type
+    Ty,
 }
 
 impl ForeignItemKind {
     pub fn descriptive_variant(&self) -> &str {
         match *self {
             ForeignItemKind::Fn(..) => "foreign function",
-            ForeignItemKind::Static(..) => "foreign static item"
+            ForeignItemKind::Static(..) => "foreign static item",
+            ForeignItemKind::Ty => "foreign type",
         }
     }
 }

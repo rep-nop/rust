@@ -29,7 +29,7 @@ use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, ExitStatus, Stdio};
+use std::process::{Command, Output, ExitStatus, Stdio, Child};
 use std::str;
 
 use extract_gdb_version;
@@ -69,7 +69,7 @@ pub fn run(config: Config, testpaths: &TestPaths) {
         print!("\n\n");
     }
     debug!("running {:?}", testpaths.file.display());
-    let base_props = TestProps::from_file(&testpaths.file, &config);
+    let base_props = TestProps::from_file(&testpaths.file, None, &config);
 
     let base_cx = TestCx { config: &config,
                            props: &base_props,
@@ -81,8 +81,9 @@ pub fn run(config: Config, testpaths: &TestPaths) {
         base_cx.run_revision()
     } else {
         for revision in &base_props.revisions {
-            let mut revision_props = base_props.clone();
-            revision_props.load_from(&testpaths.file, Some(revision), &config);
+            let revision_props = TestProps::from_file(&testpaths.file,
+                                                      Some(revision),
+                                                      &config);
             let rev_cx = TestCx {
                 config: &config,
                 props: &revision_props,
@@ -1270,6 +1271,7 @@ actual:\n\
             let crate_type = if aux_props.no_prefer_dynamic {
                 None
             } else if (self.config.target.contains("musl") && !aux_props.force_host) ||
+                      self.config.target.contains("wasm32") ||
                       self.config.target.contains("emscripten") {
                 // We primarily compile all auxiliary libraries as dynamic libraries
                 // to avoid code size bloat and large binaries as much as possible
@@ -1344,12 +1346,14 @@ actual:\n\
         if let Some(input) = input {
             child.stdin.as_mut().unwrap().write_all(input.as_bytes()).unwrap();
         }
-        let Output { status, stdout, stderr } = child.wait_with_output().unwrap();
+
+        let Output { status, stdout, stderr } = read2_abbreviated(child)
+            .expect("failed to read output");
 
         let result = ProcRes {
             status,
-            stdout: String::from_utf8(stdout).unwrap(),
-            stderr: String::from_utf8(stderr).unwrap(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
             cmdline,
         };
 
@@ -1366,7 +1370,7 @@ actual:\n\
         // Optionally prevent default --target if specified in test compile-flags.
         let custom_target = self.props.compile_flags
             .iter()
-            .fold(false, |acc, x| acc || x.starts_with("--target"));
+            .any(|x| x.starts_with("--target"));
 
         if !custom_target {
             let target = if self.props.force_host {
@@ -1384,6 +1388,8 @@ actual:\n\
 
         if let Some(ref incremental_dir) = self.props.incremental_dir {
             rustc.args(&["-Z", &format!("incremental={}", incremental_dir.display())]);
+            rustc.args(&["-Z", "incremental-verify-ich"]);
+            rustc.args(&["-Z", "incremental-queries"]);
         }
 
         match self.config.mode {
@@ -1397,6 +1403,11 @@ actual:\n\
                     rustc.args(&["--error-format", "json"]);
                 }
             }
+            Ui => {
+                if !self.props.compile_flags.iter().any(|s| s.starts_with("--error-format")) {
+                    rustc.args(&["--error-format", "json"]);
+                }
+            }
             MirOpt => {
                 rustc.args(&[
                     "-Zdump-mir=all",
@@ -1404,6 +1415,7 @@ actual:\n\
                     "-Zdump-mir-exclude-pass-number"]);
 
                 let mir_dump_dir = self.get_mir_dump_dir();
+                let _ = fs::remove_dir_all(&mir_dump_dir);
                 create_dir_all(mir_dump_dir.as_path()).unwrap();
                 let mut dir_opt = "-Zdump-mir-dir=".to_string();
                 dir_opt.push_str(mir_dump_dir.to_str().unwrap());
@@ -1420,13 +1432,15 @@ actual:\n\
             Codegen |
             Rustdoc |
             RunMake |
-            Ui |
             CodegenUnits => {
                 // do not use JSON output
             }
         }
 
-        if !self.props.no_prefer_dynamic {
+
+        if self.config.target == "wasm32-unknown-unknown" {
+            // rustc.arg("-g"); // get any backtrace at all on errors
+        } else if !self.props.no_prefer_dynamic {
             rustc.args(&["-C", "prefer-dynamic"]);
         }
 
@@ -1467,6 +1481,10 @@ actual:\n\
             let mut fname = f.file_name().unwrap().to_os_string();
             fname.push(".js");
             f.set_file_name(&fname);
+        } else if self.config.target.contains("wasm32") {
+            let mut fname = f.file_name().unwrap().to_os_string();
+            fname.push(".wasm");
+            f.set_file_name(&fname);
         } else if !env::consts::EXE_SUFFIX.is_empty() {
             let mut fname = f.file_name().unwrap().to_os_string();
             fname.push(env::consts::EXE_SUFFIX);
@@ -1487,6 +1505,22 @@ actual:\n\
             } else {
                 self.fatal("no NodeJS binary found (--nodejs)");
             }
+        }
+
+        // If this is otherwise wasm , then run tests under nodejs with our
+        // shim
+        if self.config.target.contains("wasm32") {
+            if let Some(ref p) = self.config.nodejs {
+                args.push(p.clone());
+            } else {
+                self.fatal("no NodeJS binary found (--nodejs)");
+            }
+
+            let src = self.config.src_base
+                .parent().unwrap() // chop off `run-pass`
+                .parent().unwrap() // chop off `test`
+                .parent().unwrap(); // chop off `src`
+            args.push(src.join("src/etc/wasm32-shim.js").display().to_string());
         }
 
         let exe_file = self.make_exe_name();
@@ -1564,7 +1598,7 @@ actual:\n\
     fn aux_output_dir_name(&self) -> PathBuf {
         let f = self.output_base_name();
         let mut fname = f.file_name().unwrap().to_os_string();
-        fname.push(&format!(".{}.libaux", self.config.mode));
+        fname.push(&format!("{}.aux", self.config.mode.disambiguator()));
         f.with_file_name(&fname)
     }
 
@@ -1633,7 +1667,9 @@ actual:\n\
         cmd.arg("-a").arg("-u");
         cmd.arg(filename);
         cmd.arg("-nobanner");
-        let output = match cmd.output() {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let output = match cmd.spawn().and_then(read2_abbreviated) {
             Ok(output) => output,
             Err(_) => return,
         };
@@ -2093,6 +2129,8 @@ actual:\n\
 
         let mut cmd = Command::new(make);
         cmd.current_dir(&self.testpaths.file)
+           .stdout(Stdio::piped())
+           .stderr(Stdio::piped())
            .env("TARGET", &self.config.target)
            .env("PYTHON", &self.config.docck_python)
            .env("S", src_root)
@@ -2141,7 +2179,7 @@ actual:\n\
             }
         }
 
-        let output = cmd.output().expect("failed to spawn `make`");
+        let output = cmd.spawn().and_then(read2_abbreviated).expect("failed to spawn `make`");
         if !output.status.success() {
             let res = ProcRes {
                 status: output.status,
@@ -2177,6 +2215,11 @@ actual:\n\
     }
 
     fn run_ui_test(&self) {
+        // if the user specified a format in the ui test
+        // print the output to the stderr file, otherwise extract
+        // the rendered error messages from json and print them
+        let explicit = self.props.compile_flags.iter().any(|s| s.contains("--error-format"));
+
         let proc_res = self.compile_test();
 
         let expected_stderr_path = self.expected_output_path("stderr");
@@ -2187,8 +2230,15 @@ actual:\n\
 
         let normalized_stdout =
             self.normalize_output(&proc_res.stdout, &self.props.normalize_stdout);
+
+        let stderr = if explicit {
+            proc_res.stderr.clone()
+        } else {
+            json::extract_rendered(&proc_res.stderr, &proc_res)
+        };
+
         let normalized_stderr =
-            self.normalize_output(&proc_res.stderr, &self.props.normalize_stderr);
+            self.normalize_output(&stderr, &self.props.normalize_stderr);
 
         let mut errors = 0;
         errors += self.compare_output("stdout", &normalized_stdout, &expected_stdout);
@@ -2207,11 +2257,22 @@ actual:\n\
                                 &proc_res);
         }
 
+        let expected_errors = errors::load_errors(&self.testpaths.file, self.revision);
+
         if self.props.run_pass {
             let proc_res = self.exec_compiled_test();
 
             if !proc_res.status.success() {
                 self.fatal_proc_rec("test run failed!", &proc_res);
+            }
+        }
+        if !explicit {
+            if !expected_errors.is_empty() || !proc_res.status.success() {
+                // "// error-pattern" comments
+                self.check_expected_errors(expected_errors, &proc_res);
+            } else if !self.props.error_patterns.is_empty() || !proc_res.status.success() {
+                // "//~ERROR comments"
+                self.check_error_patterns(&proc_res.stderr, &proc_res);
             }
         }
     }
@@ -2285,6 +2346,10 @@ actual:\n\
         output_file.push(test_name);
         debug!("comparing the contests of: {:?}", output_file);
         debug!("with: {:?}", expected_content);
+        if !output_file.exists() {
+            panic!("Output file `{}` from test does not exist",
+                   output_file.into_os_string().to_string_lossy());
+        }
         self.check_mir_test_timestamp(test_name, &output_file);
 
         let mut dumped_file = fs::File::open(output_file.clone()).unwrap();
@@ -2333,13 +2398,22 @@ actual:\n\
 
         // We expect each non-empty line to appear consecutively, non-consecutive lines
         // must be separated by at least one Elision
+        let mut start_block_line = None;
         while let Some(dumped_line) = dumped_lines.next() {
             match expected_lines.next() {
-                Some(&ExpectedLine::Text(expected_line)) =>
+                Some(&ExpectedLine::Text(expected_line)) => {
+                    let normalized_expected_line = normalize_mir_line(expected_line);
+                    if normalized_expected_line.contains(":{") {
+                        start_block_line = Some(expected_line);
+                    }
+
                     if !compare(expected_line, dumped_line) {
+                        error!("{:?}", start_block_line);
                         error(expected_line,
-                              format!("Mismatch in lines\nExpected Line: {:?}", dumped_line));
-                    },
+                              format!("Mismatch in lines\nCurrnt block: {}\nExpected Line: {:?}",
+                                      start_block_line.unwrap_or("None"), dumped_line));
+                    }
+                },
                 Some(&ExpectedLine::Elision) => {
                     // skip any number of elisions in a row.
                     while let Some(&&ExpectedLine::Elision) = expected_lines.peek() {
@@ -2367,19 +2441,37 @@ actual:\n\
     }
 
     fn get_mir_dump_dir(&self) -> PathBuf {
-        let mut mir_dump_dir = PathBuf::from(self.config.build_base
-                                                    .as_path()
-                                                    .to_str()
-                                                    .unwrap());
+        let mut mir_dump_dir = PathBuf::from(self.config.build_base.as_path());
         debug!("input_file: {:?}", self.testpaths.file);
-        mir_dump_dir.push(self.testpaths.file.file_stem().unwrap().to_str().unwrap());
+        mir_dump_dir.push(&self.testpaths.relative_dir);
+        mir_dump_dir.push(self.testpaths.file.file_stem().unwrap());
         mir_dump_dir
     }
 
     fn normalize_output(&self, output: &str, custom_rules: &[(String, String)]) -> String {
         let parent_dir = self.testpaths.file.parent().unwrap();
-        let parent_dir_str = parent_dir.display().to_string();
-        let mut normalized = output.replace(&parent_dir_str, "$DIR")
+        let cflags = self.props.compile_flags.join(" ");
+        let json = cflags.contains("--error-format json") ||
+                   cflags.contains("--error-format pretty-json") ||
+                   cflags.contains("--error-format=json") ||
+                   cflags.contains("--error-format=pretty-json");
+        let parent_dir_str = if json {
+            parent_dir.display().to_string().replace("\\", "\\\\")
+        } else {
+            parent_dir.display().to_string()
+        };
+
+        let mut normalized = output.replace(&parent_dir_str, "$DIR");
+
+        if json {
+            // escaped newlines in json strings should be readable
+            // in the stderr files. There's no point int being correct,
+            // since only humans process the stderr files.
+            // Thus we just turn escaped newlines back into newlines.
+            normalized = normalized.replace("\\n", "\n");
+        }
+
+        normalized = normalized.replace("\\\\", "\\") // denormalize for paths on windows
               .replace("\\", "/") // normalize for paths on windows
               .replace("\r\n", "\n") // normalize for linebreaks on windows
               .replace("\t", "\\t"); // makes tabs visible
@@ -2514,4 +2606,77 @@ fn nocomment_mir_line(line: &str) -> &str {
     } else {
         line
     }
+}
+
+fn read2_abbreviated(mut child: Child) -> io::Result<Output> {
+    use std::mem::replace;
+    use read2::read2;
+
+    const HEAD_LEN: usize = 160 * 1024;
+    const TAIL_LEN: usize = 256 * 1024;
+
+    enum ProcOutput {
+        Full(Vec<u8>),
+        Abbreviated {
+            head: Vec<u8>,
+            skipped: usize,
+            tail: Box<[u8]>,
+        }
+    }
+
+    impl ProcOutput {
+        fn extend(&mut self, data: &[u8]) {
+            let new_self = match *self {
+                ProcOutput::Full(ref mut bytes) => {
+                    bytes.extend_from_slice(data);
+                    let new_len = bytes.len();
+                    if new_len <= HEAD_LEN + TAIL_LEN {
+                        return;
+                    }
+                    let tail = bytes.split_off(new_len - TAIL_LEN).into_boxed_slice();
+                    let head = replace(bytes, Vec::new());
+                    let skipped = new_len - HEAD_LEN - TAIL_LEN;
+                    ProcOutput::Abbreviated { head, skipped, tail }
+                }
+                ProcOutput::Abbreviated { ref mut skipped, ref mut tail, .. } => {
+                    *skipped += data.len();
+                    if data.len() <= TAIL_LEN {
+                        tail[..data.len()].copy_from_slice(data);
+                        tail.rotate(data.len());
+                    } else {
+                        tail.copy_from_slice(&data[(data.len() - TAIL_LEN)..]);
+                    }
+                    return;
+                }
+            };
+            *self = new_self;
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            match self {
+                ProcOutput::Full(bytes) => bytes,
+                ProcOutput::Abbreviated { mut head, skipped, tail } => {
+                    write!(&mut head, "\n\n<<<<<< SKIPPED {} BYTES >>>>>>\n\n", skipped).unwrap();
+                    head.extend_from_slice(&tail);
+                    head
+                }
+            }
+        }
+    }
+
+    let mut stdout = ProcOutput::Full(Vec::new());
+    let mut stderr = ProcOutput::Full(Vec::new());
+
+    drop(child.stdin.take());
+    read2(child.stdout.take().unwrap(), child.stderr.take().unwrap(), &mut |is_stdout, data, _| {
+        if is_stdout { &mut stdout } else { &mut stderr }.extend(data);
+        data.clear();
+    })?;
+    let status = child.wait()?;
+
+    Ok(Output {
+        status,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+    })
 }

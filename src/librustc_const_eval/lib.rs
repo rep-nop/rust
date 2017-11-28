@@ -25,8 +25,7 @@
 #![feature(box_syntax)]
 #![feature(i128_type)]
 
-#![cfg_attr(stage0, feature(const_fn))]
-#![cfg_attr(not(stage0), feature(const_min_value))]
+#![feature(const_min_value)]
 
 extern crate arena;
 #[macro_use] extern crate syntax;
@@ -48,6 +47,16 @@ pub mod check_match;
 pub mod pattern;
 
 pub use eval::*;
+
+use rustc::ty::maps::Providers;
+
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers {
+        const_eval: eval::const_eval,
+        check_match: check_match::check_match,
+        ..*providers
+    };
+}
 
 // Build the diagnostics array at the end so that the metadata includes error use sites.
 __build_diagnostic_array! { librustc_const_eval, DIAGNOSTICS }
