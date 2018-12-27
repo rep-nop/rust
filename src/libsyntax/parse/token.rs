@@ -120,6 +120,7 @@ pub(crate) fn ident_can_begin_expr(ident: ast::Ident, is_raw: bool) -> bool {
         keywords::While.name(),
         keywords::Yield.name(),
         keywords::Static.name(),
+        keywords::Underscore.name(),
     ].contains(&ident.name)
 }
 

@@ -2583,6 +2583,22 @@ impl<'a> Parser<'a> {
 
                     hi = pth.span;
                     ex = ExprKind::Path(None, pth);
+                } else if self.eat_keyword(keywords::Underscore) {
+                    ex = ExprKind::Call(P(Expr {
+                        id: ast::DUMMY_NODE_ID,
+                        node: ExprKind::Path(
+                            None,
+                            ast::Path {
+                                span: self.span, 
+                                segments: vec![
+                                    PathSegment::from_ident(Ident::from_str("Default")),
+                                    PathSegment::from_ident(Ident::from_str("default"))
+                                ],
+                            }
+                        ),
+                        span: self.span,
+                        attrs: ThinVec::new(),
+                    }), vec![]);
                 } else {
                     match self.parse_literal_maybe_minus() {
                         Ok(expr) => {
