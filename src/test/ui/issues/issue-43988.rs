@@ -13,13 +13,13 @@ fn main() {
 
     #[repr(nothing)]
     let _x = 0;
-    //~^^ ERROR attribute should be applied to a struct, enum, or union
+    //~^^ ERROR attribute should be applied to a struct, enum, function, or union
 
     #[repr(something_not_real)]
     loop {
         ()
     };
-    //~^^^^ ERROR attribute should be applied to a struct, enum, or union
+    //~^^^^ ERROR attribute should be applied to a struct, enum, function, or union
 
     #[repr]
     let _y = "123";

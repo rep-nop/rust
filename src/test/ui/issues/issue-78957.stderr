@@ -17,11 +17,11 @@ LL | #![deny(unused_attributes)]
    |         ^^^^^^^^^^^^^^^^^
    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
 
-error[E0517]: attribute should be applied to a struct, enum, or union
+error[E0517]: attribute should be applied to a struct, enum, function, or union
   --> $DIR/issue-78957.rs:11:23
    |
 LL | pub struct Baz<#[repr(C)] const N: usize>;
-   |                       ^         - not a struct, enum, or union
+   |                       ^         - not a struct, enum, function, or union
 
 error[E0518]: attribute should be applied to function or closure
   --> $DIR/issue-78957.rs:14:17
@@ -37,11 +37,11 @@ LL | pub struct Bar2<#[cold] 'a>(PhantomData<&'a ()>);
    |
    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
 
-error[E0517]: attribute should be applied to a struct, enum, or union
+error[E0517]: attribute should be applied to a struct, enum, function, or union
   --> $DIR/issue-78957.rs:19:24
    |
 LL | pub struct Baz2<#[repr(C)] 'a>(PhantomData<&'a ()>);
-   |                        ^   -- not a struct, enum, or union
+   |                        ^   -- not a struct, enum, function, or union
 
 error[E0518]: attribute should be applied to function or closure
   --> $DIR/issue-78957.rs:22:17
@@ -57,11 +57,11 @@ LL | pub struct Bar3<#[cold] T>(PhantomData<T>);
    |
    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
 
-error[E0517]: attribute should be applied to a struct, enum, or union
+error[E0517]: attribute should be applied to a struct, enum, function, or union
   --> $DIR/issue-78957.rs:27:24
    |
 LL | pub struct Baz3<#[repr(C)] T>(PhantomData<T>);
-   |                        ^   - not a struct, enum, or union
+   |                        ^   - not a struct, enum, function, or union
 
 error: aborting due to 9 previous errors
 
