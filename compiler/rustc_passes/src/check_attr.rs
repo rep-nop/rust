@@ -989,16 +989,24 @@ impl CheckAttrVisitor<'tcx> {
 
         for hint in &hints {
             let (article, allowed_targets) = match hint.name_or_empty() {
-                _ if !matches!(target, Target::Struct | Target::Enum | Target::Union) => {
-                    ("a", "struct, enum, or union")
+                _ if !matches!(
+                    target,
+                    Target::Struct | Target::Enum | Target::Union | Target::Fn
+                ) =>
+                {
+                    ("a", "struct, enum, function, or union")
                 }
-                name @ sym::C | name @ sym::align => {
-                    is_c |= name == sym::C;
+                sym::C => {
+                    is_c = true;
                     match target {
                         Target::Struct | Target::Union | Target::Enum => continue,
                         _ => ("a", "struct, enum, or union"),
                     }
                 }
+                sym::align => match target {
+                    Target::Struct | Target::Union | Target::Enum | Target::Fn => continue,
+                    _ => ("a", "struct, enum, function, or union"),
+                },
                 sym::packed => {
                     if target != Target::Struct && target != Target::Union {
                         ("a", "struct or union")

@@ -2838,6 +2838,50 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                     None
                 }
             };
+        } else if tcx.sess.check_name(attr, sym::repr) {
+            codegen_fn_attrs.alignment = match attr.meta_item_list() {
+                Some(items) => match items.as_slice() {
+                    [item] => match item.name_value_literal() {
+                        Some((sym::align, literal)) => {
+                            let alignment = match &literal.kind {
+                                ast::LitKind::Int(literal, ast::LitIntType::Unsuffixed) => {
+                                    if literal.is_power_of_two() {
+                                        // rustc_middle::ty::layout::Align restricts align to <= 2^29
+                                        if *literal <= 1 << 29 {
+                                            Ok(*literal as u32)
+                                        } else {
+                                            Err("larger than 2^29")
+                                        }
+                                    } else {
+                                        Err("not a power of two")
+                                    }
+                                }
+                                _ => Err("not an unsuffixed integer"),
+                            };
+
+                            match alignment {
+                                Ok(align) => Some(align),
+                                Err(msg) => {
+                                    struct_span_err!(
+                                        tcx.sess.diagnostic(),
+                                        attr.span,
+                                        E0589,
+                                        "invalid `repr(align)` attribute: {}",
+                                        msg
+                                    )
+                                    .emit();
+
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    },
+                    [] => None,
+                    _ => None,
+                },
+                None => None,
+            };
         }
     }
 
