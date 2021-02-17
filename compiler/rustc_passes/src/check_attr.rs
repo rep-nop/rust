@@ -1003,10 +1003,22 @@ impl CheckAttrVisitor<'tcx> {
                         _ => ("a", "struct, enum, or union"),
                     }
                 }
-                sym::align => match target {
-                    Target::Struct | Target::Union | Target::Enum | Target::Fn => continue,
-                    _ => ("a", "struct, enum, function, or union"),
-                },
+                sym::align => {
+                    if let (Target::Fn, true) = (target, !self.tcx.features().fn_align) {
+                        feature_err(
+                            &self.tcx.sess.parse_sess,
+                            sym::fn_align,
+                            hint.span(),
+                            "the attribute `repr(align(...))` on functions is unstable",
+                        )
+                        .emit();
+                    }
+
+                    match target {
+                        Target::Struct | Target::Union | Target::Enum | Target::Fn => continue,
+                        _ => ("a", "struct, enum, function, or union"),
+                    }
+                }
                 sym::packed => {
                     if target != Target::Struct && target != Target::Union {
                         ("a", "struct or union")

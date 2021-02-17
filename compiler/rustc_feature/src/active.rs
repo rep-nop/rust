@@ -644,6 +644,9 @@ declare_features! (
     /// Allows associated types in inherent impls.
     (active, inherent_associated_types, "1.52.0", Some(8995), None),
 
+    /// Allows using `#[repr(align(...))]` on function items
+    (active, fn_align, "1.52.0", Some(82232), None),
+
     // -------------------------------------------------------------------------
     // feature-group-end: actual feature gates
     // -------------------------------------------------------------------------
