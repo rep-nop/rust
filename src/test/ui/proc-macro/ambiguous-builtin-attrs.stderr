@@ -94,14 +94,14 @@ error[E0517]: attribute should be applied to a struct, enum, function, or union
 LL | fn non_macro_expanded_location<#[repr(C)] T>() {
    |                                       ^   - not a struct, enum, function, or union
 
-error[E0517]: attribute should be applied to a struct, enum, or union
+error[E0517]: attribute should be applied to a struct, enum, function, or union
   --> $DIR/ambiguous-builtin-attrs.rs:24:16
    |
 LL |         #[repr(C)]
    |                ^
 ...
 LL |         _ => {}
-   |         ------- not a struct, enum, or union
+   |         ------- not a struct, enum, function, or union
 
 error: aborting due to 9 previous errors
 
